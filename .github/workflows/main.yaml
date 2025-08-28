@@ -1,0 +1,28 @@
+name: Build and deploy log-tailer
+on:
+  push:
+    paths-ignore:
+      - '*.md'
+
+env:
+  NAME: log-tailer
+
+jobs:
+  build_and_push:
+    outputs:
+      version: "${{ steps.build-push-sign.outputs.version }}"
+    permissions:
+      contents: read
+      id-token: write
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: nais/platform-build-push-sign@main
+        id: build-push-sign
+        with:
+          name: ${{ env.NAME }}
+          google_service_account: gh-${{ env.NAME }}
+          push: ${{ github.actor != 'dependabot[bot]' && github.ref == 'refs/heads/main' }}
+          workload_identity_provider: ${{ secrets.NAIS_IO_WORKLOAD_IDENTITY_PROVIDER }}
