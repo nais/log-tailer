@@ -1,18 +1,13 @@
-FROM rust:1 AS builder
+FROM golang:1.25 AS builder
 
-RUN apt update -y; apt-get install gcc-x86-64-linux-gnu -y
-ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl
-ENV RUSTFLAGS='-C linker=x86_64-linux-gnu-gcc'
-
-RUN rustup target add x86_64-unknown-linux-musl
-RUN git clone https://github.com/uutils/coreutils
-
-WORKDIR coreutils
-RUN cargo build -p uu_tail --release --no-default-features
+RUN apt update -y && apt install -y gcc-x86-64-linux-gnu
+WORKDIR /app
+COPY . /app
+RUN go build -o log-tailer main.go
 
 FROM scratch
 
 WORKDIR /app
-COPY --from=builder coreutils/target/x86_64-unknown-linux-musl/release/tail /app/tail
+COPY --from=builder /app/log-tailer /app/log-tailer
 
-ENTRYPOINT ["/app/tail", "-F"]
+ENTRYPOINT ["/app/log-tailer"]

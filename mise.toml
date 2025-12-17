@@ -1,0 +1,20 @@
+[tools]
+go = "1.25.5"
+
+[settings]
+pin = true
+
+[tasks]
+lint = { run = "staticcheck ./..." }
+format = { run = "gofumpt -w ." }
+
+vulncheck = { run = "govulncheck ./..." }
+security = { run = "gosec ./..." }
+
+test = { run = "go test ./..." }
+
+build = { run = "go build -o bin/log-tailer ." }
+
+all = { depends = ["test", "lint", "format", "vulncheck", "security"] }
+
+check = { depends = ["test", "lint", "vulncheck", "security"] }
