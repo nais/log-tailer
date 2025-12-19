@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -113,26 +114,20 @@ func main() {
 		lastFileInfo = info
 	}
 
-	// Use the log file as the input source
-	// Important: Create the decoder AFTER seeking to ensure it starts from the correct position
-	decoder := json.NewDecoder(logFile)
+	// Use bufio.Scanner for efficient line-by-line reading
+	scanner := bufio.NewScanner(logFile)
 	log.Println("Starting log tail...")
 
 	// Log the initial file position
 	if pos, err := logFile.Seek(0, 1); err == nil {
-		log.Printf("Decoder starting at file position: %d", pos)
+		log.Printf("Starting at file position: %d", pos)
 	}
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
 	defer rotationCheckTicker.Stop()
 
-	// Ticker for periodic status logging
-	statusTicker := time.NewTicker(10 * time.Second)
-	defer statusTicker.Stop()
-
 	entriesProcessed := 0
-	consecutiveEOFs := 0
 
 	for {
 		// Check for context cancellation
@@ -163,7 +158,7 @@ func main() {
 				}
 
 				logFile = newFile
-				decoder = json.NewDecoder(logFile)
+				scanner = bufio.NewScanner(logFile)
 
 				// Update file info
 				if info, err := logFile.Stat(); err == nil {
@@ -171,86 +166,58 @@ func main() {
 					log.Printf("Successfully reopened log file (new size: %d bytes)", info.Size())
 				}
 			}
-		case <-statusTicker.C:
-			if info, err := logFile.Stat(); err == nil {
-				pos, _ := logFile.Seek(0, 1) // Get current position without changing it
-				if pos < info.Size() {
-					log.Printf("Status: reading file (size: %d bytes, position: %d, remaining: %d bytes, entries: %d)",
-						info.Size(), pos, info.Size()-pos, entriesProcessed)
-				} else {
-					log.Printf("Status: waiting for new logs (size: %d bytes, position: %d, entries: %d) - no new data written",
-						info.Size(), pos, entriesProcessed)
-				}
-			}
 		default:
 			// Don't block on rotation check
 		}
 
-		var logEntry map[string]interface{}
-		err := decoder.Decode(&logEntry)
-		if err != nil {
-			if err == io.EOF {
-				consecutiveEOFs++
-				if consecutiveEOFs == 1 || consecutiveEOFs%100 == 0 {
-					// Check if file has grown
-					if info, statErr := logFile.Stat(); statErr == nil {
-						if pos, seekErr := logFile.Seek(0, 1); seekErr == nil {
-							log.Printf("Hit EOF (count: %d), file size: %d, position: %d, remaining: %d bytes",
-								consecutiveEOFs, info.Size(), pos, info.Size()-pos)
-						}
-					} else {
-						log.Printf("Hit EOF (count: %d), waiting for new data...", consecutiveEOFs)
+		// Try to scan the next line
+		if scanner.Scan() {
+			line := scanner.Text()
+
+			// Parse JSON log entry
+			var logEntry map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
+				log.Printf("Failed to parse JSON log line: %v", err)
+				continue
+			}
+
+			entriesProcessed++
+			if entriesProcessed%100 == 0 {
+				log.Printf("Processed %d log entries", entriesProcessed)
+			}
+
+			// Check for context cancellation between processing entries
+			select {
+			case <-ctx.Done():
+				log.Println("Context cancelled, stopping log processing")
+				return
+			default:
+			}
+
+			// Process the log entry
+			if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
+				// Send to GCP in background to avoid blocking
+				go func(entry map[string]interface{}) {
+					if err := sendToGCP(client, entry, clusterName, teamProjectID); err != nil {
+						log.Printf("Failed to send audit log: %v", err)
 					}
+				}(logEntry)
+			} else {
+				// Non-audit logs printed to stdout
+				if jsonOutput, err := json.Marshal(logEntry); err == nil {
+					fmt.Println(string(jsonOutput))
 				}
-				// Recreate the decoder to clear its internal buffer and force it to read from the file again
-				// This is necessary because json.Decoder buffers data and won't automatically
-				// try to read more even after new data is written to the file
-				if consecutiveEOFs%10 == 0 {
-					decoder = json.NewDecoder(logFile)
-					log.Printf("Recreated decoder after %d consecutive EOFs", consecutiveEOFs)
-				}
-				// Reached end of file, wait a bit and continue (tail behavior)
+			}
+		} else {
+			// No more lines available - check for errors
+			if err := scanner.Err(); err != nil {
+				log.Printf("Scanner error: %v", err)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			// Log the error type and details for debugging
-			log.Printf("Failed to decode log entry (error type: %T): %v", err, err)
-			consecutiveEOFs = 0
-			// Wait a bit before retrying on decode errors
+
+			// EOF reached, wait for new data (tail behavior)
 			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// Reset EOF counter when we successfully read an entry
-		consecutiveEOFs = 0
-
-		// Successfully decoded an entry
-		if entriesProcessed == 0 {
-			log.Printf("Successfully decoded first log entry!")
-		}
-
-		// Check for context cancellation between processing entries
-		select {
-		case <-ctx.Done():
-			log.Println("Context cancelled, stopping log processing")
-			return
-		default:
-		}
-
-		// Process the log entry
-		entriesProcessed++
-		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
-			// Send to GCP in background to avoid blocking
-			go func(entry map[string]interface{}) {
-				if err := sendToGCP(client, entry, clusterName, teamProjectID); err != nil {
-					log.Printf("Failed to send audit log: %v", err)
-				}
-			}(logEntry)
-		} else {
-			// Non-audit logs printed to stdout
-			if jsonOutput, err := json.Marshal(logEntry); err == nil {
-				fmt.Println(string(jsonOutput))
-			}
 		}
 	}
 }
