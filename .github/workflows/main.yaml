@@ -19,9 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # ratchet:actions/checkout@v6
 
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # ratchet:jdx/mise-action@v2
+      - uses: jdx/mise-action@v3
         with:
-          version: latest
+          version: 2025.12.12
+          install: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run tests
         run: mise test
