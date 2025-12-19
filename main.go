@@ -94,9 +94,9 @@ func main() {
 					log.Printf("Warning: Failed to seek to end of file: %v", err)
 				} else {
 					log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
-					// The decoder is now at the end of the file, ready to read new content
-					// Note: We might be in the middle of a line, but the decoder will handle this
-					// by waiting for the next complete JSON object
+					// Note: We're now at the end of the file, which might be in the middle of a line
+					// The scanner will wait for the next complete line (ending with \n)
+					// This is correct behavior - we'll catch the next complete log entry
 				}
 			} else {
 				log.Printf("Log file is empty - waiting for new log entries")
@@ -116,12 +116,22 @@ func main() {
 
 	// Use bufio.Scanner for efficient line-by-line reading
 	scanner := bufio.NewScanner(logFile)
+
+	// Increase buffer size to handle large log lines (default is 64KB)
+	const maxScanTokenSize = 1024 * 1024 // 1MB
+	buf := make([]byte, maxScanTokenSize)
+	scanner.Buffer(buf, maxScanTokenSize)
+
 	log.Println("Starting log tail...")
 
 	// Log the initial file position
 	if pos, err := logFile.Seek(0, 1); err == nil {
 		log.Printf("Starting at file position: %d", pos)
 	}
+
+	// Track activity for debugging
+	lastStatusLog := time.Now()
+	scanAttempts := 0
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
@@ -173,6 +183,7 @@ func main() {
 		// Try to scan the next line
 		if scanner.Scan() {
 			line := scanner.Text()
+			scanAttempts = 0 // Reset counter on successful scan
 
 			// Parse JSON log entry
 			var logEntry map[string]interface{}
@@ -182,6 +193,9 @@ func main() {
 			}
 
 			entriesProcessed++
+			if entriesProcessed == 1 {
+				log.Printf("Successfully read first log entry!")
+			}
 			if entriesProcessed%100 == 0 {
 				log.Printf("Processed %d log entries", entriesProcessed)
 			}
@@ -217,6 +231,24 @@ func main() {
 			}
 
 			// EOF reached, wait for new data (tail behavior)
+			scanAttempts++
+
+			// Log status every 10 seconds when we're waiting
+			if time.Since(lastStatusLog) > 10*time.Second {
+				if info, err := logFile.Stat(); err == nil {
+					pos, _ := logFile.Seek(0, 1)
+					remaining := info.Size() - pos
+					log.Printf("Waiting for new data: file size=%d, position=%d, remaining=%d bytes, scan attempts=%d, entries=%d",
+						info.Size(), pos, remaining, scanAttempts, entriesProcessed)
+
+					// If there's remaining data but we're not reading it, that's a problem
+					if remaining > 0 {
+						log.Printf("WARNING: File has %d bytes remaining but scanner returned false - possible partial line issue", remaining)
+					}
+				}
+				lastStatusLog = time.Now()
+			}
+
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
