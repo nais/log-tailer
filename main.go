@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -21,7 +22,9 @@ import (
 
 func main() {
 	logFilePath := flag.String("log-file", "", "Path to the log file to tail (required)")
-	projectID := flag.String("project-id", "", "GCP project ID (optional, for local testing")
+	projectID := flag.String("project-id", "", "GCP project ID (optional, for local testing)")
+	fromBeginning := flag.Bool("from-beginning", false, "Read from the beginning of the file instead of tailing (for testing)")
+	testLastN := flag.Int("test-last-n", 0, "Test mode: read last N entries from file and exit (for debugging)")
 
 	flag.Parse()
 
@@ -35,6 +38,12 @@ func main() {
 		log.Fatalf("Failed to open log file: %v", err)
 	}
 	defer logFile.Close()
+
+	// Test mode: read last N entries and exit
+	if *testLastN > 0 {
+		testReadLastEntries(logFile, *testLastN)
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -77,18 +86,25 @@ func main() {
 	defer client.Close()
 
 	// Seek to end of file if it exists (don't reprocess old logs on restart)
-	if info, err := logFile.Stat(); err == nil {
-		if info.Size() > 0 {
-			if pos, err := logFile.Seek(0, 2); err != nil {
-				log.Printf("Warning: Failed to seek to end of file: %v", err)
+	if !*fromBeginning {
+		if info, err := logFile.Stat(); err == nil {
+			if info.Size() > 0 {
+				if pos, err := logFile.Seek(0, 2); err != nil {
+					log.Printf("Warning: Failed to seek to end of file: %v", err)
+				} else {
+					log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
+					// The decoder is now at the end of the file, ready to read new content
+					// Note: We might be in the middle of a line, but the decoder will handle this
+					// by waiting for the next complete JSON object
+				}
 			} else {
-				log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
+				log.Printf("Log file is empty - waiting for new log entries")
 			}
 		} else {
-			log.Printf("Log file is empty - waiting for new log entries")
+			log.Printf("Warning: Failed to stat log file: %v", err)
 		}
 	} else {
-		log.Printf("Warning: Failed to stat log file: %v", err)
+		log.Printf("Reading from beginning of file (--from-beginning flag set)")
 	}
 
 	// Track file info for rotation detection
@@ -98,8 +114,14 @@ func main() {
 	}
 
 	// Use the log file as the input source
+	// Important: Create the decoder AFTER seeking to ensure it starts from the correct position
 	decoder := json.NewDecoder(logFile)
 	log.Println("Starting log tail...")
+
+	// Log the initial file position
+	if pos, err := logFile.Seek(0, 1); err == nil {
+		log.Printf("Decoder starting at file position: %d", pos)
+	}
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
@@ -110,6 +132,7 @@ func main() {
 	defer statusTicker.Stop()
 
 	entriesProcessed := 0
+	consecutiveEOFs := 0
 
 	for {
 		// Check for context cancellation
@@ -150,7 +173,14 @@ func main() {
 			}
 		case <-statusTicker.C:
 			if info, err := logFile.Stat(); err == nil {
-				log.Printf("Status: waiting for logs (file size: %d bytes, entries processed: %d)", info.Size(), entriesProcessed)
+				pos, _ := logFile.Seek(0, 1) // Get current position without changing it
+				if pos < info.Size() {
+					log.Printf("Status: reading file (size: %d bytes, position: %d, remaining: %d bytes, entries: %d)",
+						info.Size(), pos, info.Size()-pos, entriesProcessed)
+				} else {
+					log.Printf("Status: waiting for new logs (size: %d bytes, position: %d, entries: %d) - no new data written",
+						info.Size(), pos, entriesProcessed)
+				}
 			}
 		default:
 			// Don't block on rotation check
@@ -159,15 +189,44 @@ func main() {
 		var logEntry map[string]interface{}
 		err := decoder.Decode(&logEntry)
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
+				consecutiveEOFs++
+				if consecutiveEOFs == 1 || consecutiveEOFs%100 == 0 {
+					// Check if file has grown
+					if info, statErr := logFile.Stat(); statErr == nil {
+						if pos, seekErr := logFile.Seek(0, 1); seekErr == nil {
+							log.Printf("Hit EOF (count: %d), file size: %d, position: %d, remaining: %d bytes",
+								consecutiveEOFs, info.Size(), pos, info.Size()-pos)
+						}
+					} else {
+						log.Printf("Hit EOF (count: %d), waiting for new data...", consecutiveEOFs)
+					}
+				}
+				// Recreate the decoder to clear its internal buffer and force it to read from the file again
+				// This is necessary because json.Decoder buffers data and won't automatically
+				// try to read more even after new data is written to the file
+				if consecutiveEOFs%10 == 0 {
+					decoder = json.NewDecoder(logFile)
+					log.Printf("Recreated decoder after %d consecutive EOFs", consecutiveEOFs)
+				}
 				// Reached end of file, wait a bit and continue (tail behavior)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			log.Printf("Failed to decode log entry: %v", err)
+			// Log the error type and details for debugging
+			log.Printf("Failed to decode log entry (error type: %T): %v", err, err)
+			consecutiveEOFs = 0
 			// Wait a bit before retrying on decode errors
 			time.Sleep(100 * time.Millisecond)
 			continue
+		}
+
+		// Reset EOF counter when we successfully read an entry
+		consecutiveEOFs = 0
+
+		// Successfully decoded an entry
+		if entriesProcessed == 0 {
+			log.Printf("Successfully decoded first log entry!")
 		}
 
 		// Check for context cancellation between processing entries
@@ -364,4 +423,63 @@ func getK8sClient() (*kubernetes.Clientset, error) {
 	}
 
 	return clientset, nil
+}
+
+// testReadLastEntries reads approximately the last N entries from the file for debugging
+func testReadLastEntries(file *os.File, n int) {
+	log.Printf("Test mode: attempting to read last %d entries from file", n)
+
+	// Get file size
+	info, err := file.Stat()
+	if err != nil {
+		log.Fatalf("Failed to stat file: %v", err)
+	}
+
+	fileSize := info.Size()
+	log.Printf("File size: %d bytes", fileSize)
+
+	// Start from a position that's likely to contain the last N entries
+	// Assume average entry is ~500 bytes, seek back n*1000 bytes to be safe
+	seekPos := fileSize - int64(n*1000)
+	if seekPos < 0 {
+		seekPos = 0
+	}
+
+	if _, err := file.Seek(seekPos, 0); err != nil {
+		log.Fatalf("Failed to seek: %v", err)
+	}
+
+	log.Printf("Seeking to position: %d", seekPos)
+
+	decoder := json.NewDecoder(file)
+	entries := make([]map[string]interface{}, 0, n)
+
+	// Read all entries from this position
+	for {
+		var entry map[string]interface{}
+		if err := decoder.Decode(&entry); err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Decode error: %v", err)
+			// Try to skip to next line
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	totalRead := len(entries)
+	log.Printf("Read %d total entries from position %d", totalRead, seekPos)
+
+	// Print the last N entries
+	start := 0
+	if totalRead > n {
+		start = totalRead - n
+	}
+
+	log.Printf("Displaying last %d entries:", len(entries[start:]))
+	for i, entry := range entries[start:] {
+		jsonBytes, _ := json.MarshalIndent(entry, "", "  ")
+		log.Printf("\n=== Entry %d ===\n%s\n", i+1, string(jsonBytes))
+	}
 }
