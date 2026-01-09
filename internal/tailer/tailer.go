@@ -207,7 +207,11 @@ func (t *Tailer) Tail(ctx context.Context) {
 		// Parse JSON log entry
 		var logEntry map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
-			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.Any("truncated_line", line[:truncatedLength]))
+			truncatedLine := line
+			if len(truncatedLine) > truncatedLength {
+				truncatedLine = truncatedLine[:truncatedLength]
+			}
+			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.Any("truncated_line", truncatedLine))
 			continue
 		}
 
