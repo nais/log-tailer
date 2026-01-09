@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 const (
@@ -32,29 +34,51 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 	newFileCheckTicker := time.NewTicker(newFileCheckInterval)
 	defer newFileCheckTicker.Stop()
 
-	tailers := make(map[string]*Tailer)
-	for {
-		logger.Info("Looking for files matching pattern", slog.Any("pattern", logFilePattern))
-		matches, err := filepath.Glob(logFilePattern)
-		if err != nil {
-			logger.Error("Error listing files", slog.Any("error", err))
-			os.Exit(5)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Error("Unable to use fsnotify to watch for filechanges, falling back to ticker")
+	} else {
+		dir := path.Dir(logFilePattern)
+		if err := watcher.Add(dir); err != nil {
+			logger.Error("Error creating watch for directory", slog.Any("error", err), slog.Any("directory", dir))
 		}
-		for _, match := range matches {
-			if _, ok := tailers[match]; !ok {
-				logger.Info("New file found, starting tail", slog.Any("filepath", match))
-				t := NewTailer(match, logEntries, logLines, logger)
-				tailers[match] = t
-				go t.Tail(ctx)
-			}
-		}
+		defer watcher.Close()
+	}
 
+	tailers := make(map[string]*Tailer)
+	lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Context cancelled, stopping processing")
 			return
 		case <-newFileCheckTicker.C:
-			continue
+			logger.Info("Ticker ticked")
+			lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+		case event := <-watcher.Events:
+			if event.Has(fsnotify.Create) {
+				logger.Info("Fsnotify sent event")
+				lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+			}
+		case err := <-watcher.Errors:
+			logger.Error("Error watching files", slog.Any("error", err))
+		}
+	}
+}
+
+func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) {
+	logger.Info("Looking for files matching pattern", slog.Any("pattern", logFilePattern))
+	matches, err := filepath.Glob(logFilePattern)
+	if err != nil {
+		logger.Error("Error listing files", slog.Any("error", err))
+		os.Exit(5)
+	}
+	for _, match := range matches {
+		if _, ok := tailers[match]; !ok {
+			logger.Info("New file found, starting tail", slog.Any("filepath", match))
+			t := NewTailer(match, logEntries, logLines, logger)
+			tailers[match] = t
+			go t.Tail(ctx)
 		}
 	}
 }

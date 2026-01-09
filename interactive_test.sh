@@ -4,8 +4,18 @@
 
 set -e
 
-TESTFILE="/tmp/test_postgres_interactive.log"
+# Number of log files to use for round robin
+NUM_FILES=3
+LOG_FILE_PREFIX="/tmp/test_postgres_interactive_"
+LOG_FILE_SUFFIX=".log"
+LOG_GLOB="/tmp/test_postgres_interactive_*.log"
 PROJECT_ID="test-project"
+
+# Build array of log files
+LOG_FILES=()
+for i in $(seq 1 $NUM_FILES); do
+    LOG_FILES+=("${LOG_FILE_PREFIX}${i}${LOG_FILE_SUFFIX}")
+done
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -14,18 +24,19 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Log Tailer Interactive Test ===${NC}"
+echo -e "${BLUE}=== Log Tailer Interactive Test (Round Robin, $NUM_FILES files) ===${NC}"
 echo ""
 
-# Clean up any existing test file
-if [ -f "$TESTFILE" ]; then
-    echo -e "${YELLOW}Removing existing test file...${NC}"
-    rm "$TESTFILE"
-fi
-
-# Create an empty log file
-touch "$TESTFILE"
-echo -e "${GREEN}Created empty test file: $TESTFILE${NC}"
+# Clean up any existing test files
+for file in "${LOG_FILES[@]}"; do
+    if [ -f "$file" ]; then
+        echo -e "${YELLOW}Removing existing test file $file...${NC}"
+        rm "$file"
+    fi
+    # Create an empty log file
+    touch "$file"
+done
+echo -e "${GREEN}Created empty test files: ${LOG_FILES[*]}${NC}"
 echo ""
 
 # Build the log-tailer if not already built
@@ -36,9 +47,10 @@ if [ ! -f "bin/log-tailer" ]; then
     echo ""
 fi
 
-# Start the log tailer in the background
-echo -e "${BLUE}Starting log-tailer in background...${NC}"
-bin/log-tailer --log-file="$TESTFILE" --project-id="$PROJECT_ID" > /tmp/tailer_output.log 2>&1 &
+# Start the log tailer in the background with the glob pattern
+LOG_TAILER_OUT="/tmp/tailer_output.log"
+echo -e "${BLUE}Starting log-tailer in background (glob: $LOG_GLOB)...${NC}"
+bin/log-tailer --log-file="$LOG_GLOB" --project-id="$PROJECT_ID" > "$LOG_TAILER_OUT" 2>&1 &
 TAILER_PID=$!
 
 # Function to cleanup on exit
@@ -49,8 +61,11 @@ cleanup() {
     echo -e "${GREEN}Log tailer stopped (PID: $TAILER_PID)${NC}"
     echo ""
     echo -e "${BLUE}Log tailer output:${NC}"
-    cat /tmp/tailer_output.log
+    cat "$LOG_TAILER_OUT"
     echo ""
+    for file in "${LOG_FILES[@]}"; do
+        rm -f "$file"
+    done
 }
 
 trap cleanup EXIT
@@ -61,33 +76,38 @@ sleep 2
 # Check if tailer is still running
 if ! kill -0 $TAILER_PID 2>/dev/null; then
     echo -e "${RED}ERROR: Log tailer failed to start!${NC}"
-    cat /tmp/tailer_output.log
+    cat "$LOG_TAILER_OUT"
     exit 1
 fi
 
 echo -e "${GREEN}Log tailer started (PID: $TAILER_PID)${NC}"
-echo -e "${BLUE}Output is being written to: /tmp/tailer_output.log${NC}"
+echo -e "${BLUE}Output is being written to: $LOG_TAILER_OUT${NC}"
 echo ""
 
-# Function to add a log entry
+echo -e "${YELLOW}Test files:${NC} ${LOG_FILES[*]}"
+echo ""
+
+# Function to add a log entry in round robin fashion
 add_log_entry() {
     local entry_num=$1
     local entry_type=$2
+    local file_index=$(( (entry_num - 1) % NUM_FILES ))
+    local target_file="${LOG_FILES[$file_index]}"
     local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     if [ "$entry_type" = "audit" ]; then
         local message="AUDIT: SESSION,$entry_num,1,READ,SELECT,TABLE,public.users,SELECT * FROM users WHERE id = $entry_num"
-        echo "{\"timestamp\": \"$timestamp\", \"user\": \"testuser\", \"dbname\": \"testdb\", \"message\": \"$message\", \"backend_type\": \"client backend\"}" >> "$TESTFILE"
-        echo -e "${GREEN}Added AUDIT log entry #$entry_num${NC}"
+        echo "{\"timestamp\": \"$timestamp\", \"user\": \"testuser\", \"dbname\": \"testdb\", \"message\": \"$message\", \"backend_type\": \"client backend\"}" >> "$target_file"
+        echo -e "${GREEN}Added AUDIT log entry #$entry_num to $target_file${NC}"
     else
         local message="Regular log entry number $entry_num"
-        echo "{\"timestamp\": \"$timestamp\", \"user\": \"testuser\", \"dbname\": \"testdb\", \"message\": \"$message\", \"backend_type\": \"client backend\"}" >> "$TESTFILE"
-        echo -e "${GREEN}Added regular log entry #$entry_num${NC}"
+        echo "{\"timestamp\": \"$timestamp\", \"user\": \"testuser\", \"dbname\": \"testdb\", \"message\": \"$message\", \"backend_type\": \"client backend\"}" >> "$target_file"
+        echo -e "${GREEN}Added regular log entry #$entry_num to $target_file${NC}"
     fi
 
     # Show current file size
-    local size=$(wc -c < "$TESTFILE" | tr -d ' ')
-    echo -e "${BLUE}File size: $size bytes${NC}"
+    local size=$(wc -c < "$target_file" | tr -d ' ')
+    echo -e "${BLUE}File size for $target_file: $size bytes${NC}"
 }
 
 # Interactive mode
@@ -98,14 +118,24 @@ echo -e "  ${GREEN}2${NC} - Add an AUDIT log entry"
 echo -e "  ${GREEN}3${NC} - Add 5 regular entries quickly"
 echo -e "  ${GREEN}4${NC} - Add 5 AUDIT entries quickly"
 echo -e "  ${GREEN}5${NC} - Show tailer output"
-echo -e "  ${GREEN}6${NC} - Show test file size"
+echo -e "  ${GREEN}6${NC} - Show test file sizes"
+echo -e "  ${GREEN}7${NC} - Add a new log file to the distribution"
 echo -e "  ${GREEN}q${NC} - Quit"
 echo ""
 
 entry_counter=1
 
+add_new_log_file() {
+    local new_index=$((NUM_FILES + 1))
+    local new_file="${LOG_FILE_PREFIX}${new_index}${LOG_FILE_SUFFIX}"
+    touch "$new_file"
+    LOG_FILES+=("$new_file")
+    NUM_FILES=$new_index
+    echo -e "${GREEN}Added new log file: $new_file${NC}"
+}
+
 while true; do
-    echo -n -e "${YELLOW}Enter command (1-6 or q): ${NC}"
+    echo -n -e "${YELLOW}Enter command (1-7 or q): ${NC}"
     read -r command
 
     case "$command" in
@@ -141,14 +171,20 @@ while true; do
             ;;
         5)
             echo -e "${BLUE}=== Tailer Output (last 30 lines) ===${NC}"
-            tail -30 /tmp/tailer_output.log
+            tail -30 "$LOG_TAILER_OUT"
             echo ""
             ;;
         6)
-            size=$(wc -c < "$TESTFILE" | tr -d ' ')
-            lines=$(wc -l < "$TESTFILE" | tr -d ' ')
-            echo -e "${BLUE}Test file: $TESTFILE${NC}"
-            echo -e "${BLUE}Size: $size bytes, Lines: $lines${NC}"
+            for file in "${LOG_FILES[@]}"; do
+                size=$(wc -c < "$file" | tr -d ' ')
+                lines=$(wc -l < "$file" | tr -d ' ')
+                echo -e "${BLUE}Test file: $file${NC}"
+                echo -e "${BLUE}Size: $size bytes, Lines: $lines${NC}"
+            done
+            echo ""
+            ;;
+        7)
+            add_new_log_file
             echo ""
             ;;
         q|Q)
