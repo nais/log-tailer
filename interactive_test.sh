@@ -29,16 +29,16 @@ echo -e "${GREEN}Created empty test file: $TESTFILE${NC}"
 echo ""
 
 # Build the log-tailer if not already built
-if [ ! -f "./log-tailer" ]; then
+if [ ! -f "bin/log-tailer" ]; then
     echo -e "${YELLOW}Building log-tailer...${NC}"
-    go build -o log-tailer main.go
+    mise run build
     echo -e "${GREEN}Build complete${NC}"
     echo ""
 fi
 
 # Start the log tailer in the background
 echo -e "${BLUE}Starting log-tailer in background...${NC}"
-./log-tailer --log-file="$TESTFILE" --project-id="$PROJECT_ID" > /tmp/tailer_output.log 2>&1 &
+bin/log-tailer --log-file="$TESTFILE" --project-id="$PROJECT_ID" > /tmp/tailer_output.log 2>&1 &
 TAILER_PID=$!
 
 # Function to cleanup on exit
@@ -145,8 +145,8 @@ while true; do
             echo ""
             ;;
         6)
-            local size=$(wc -c < "$TESTFILE" | tr -d ' ')
-            local lines=$(wc -l < "$TESTFILE" | tr -d ' ')
+            size=$(wc -c < "$TESTFILE" | tr -d ' ')
+            lines=$(wc -l < "$TESTFILE" | tr -d ' ')
             echo -e "${BLUE}Test file: $TESTFILE${NC}"
             echo -e "${BLUE}Size: $size bytes, Lines: $lines${NC}"
             echo ""

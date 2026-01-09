@@ -1,47 +1,46 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"log"
+	"log-tailer/internal/auditlogger"
+	"log-tailer/internal/filelogger"
+	"log-tailer/internal/tailer"
+	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"time"
 
 	"cloud.google.com/go/logging"
-	mrpb "google.golang.org/genproto/googleapis/api/monitoredres"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
+const (
+	auditLogEntryCapacity = 100
+	fileLogLinesCapacity  = 100
+)
+
 func main() {
-	logFilePath := flag.String("log-file", "", "Path to the log file to tail (required)")
+	logFilePath := flag.String("log-file", "", "Glob pattern to the log file to tail (required)")
 	projectID := flag.String("project-id", "", "GCP project ID (optional, for local testing)")
 
 	flag.Parse()
 
+	mainLogger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	if *logFilePath == "" {
 		flag.Usage()
-		log.Fatal("Flag -log-file is required")
+		mainLogger.Error("Flag -log-file is required")
+		os.Exit(1)
 	}
-
-	logFile, err := os.Open(*logFilePath)
-	if err != nil {
-		log.Fatalf("Failed to open log file: %v", err)
-	}
-	defer logFile.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go handleShutdown(cancel)
+	go handleShutdown(cancel, mainLogger)
 
 	var namespace string
 	var clusterName string
@@ -52,290 +51,59 @@ func main() {
 		teamProjectID = *projectID
 		namespace = "local"
 		clusterName = "local-cluster"
-		log.Printf("Running in local mode with project: %s", teamProjectID)
+		mainLogger.Info("Running in local mode", slog.Any("projectID", teamProjectID))
 	} else {
 		// Only create K8s client when running in cluster
 		k8sClient, err := getK8sClient()
 		if err != nil {
-			log.Fatalf("Failed to create Kubernetes client: %v", err)
+			mainLogger.Error("Failed to create Kubernetes client", slog.Any("error", err))
+			os.Exit(2)
 		}
 
 		namespace, clusterName, err = getPodInfo(k8sClient)
 		if err != nil {
-			log.Fatalf("Failed to get pod info: %v", err)
+			mainLogger.Error("Failed to get pod info", slog.Any("error", err))
+			os.Exit(2)
 		}
 
 		teamProjectID, err = getProjectIDFromNamespace(k8sClient, namespace)
 		if err != nil {
-			log.Fatalf("Failed to get project ID: %v", err)
+			mainLogger.Error("Failed to get project ID", slog.Any("error", err))
+			os.Exit(2)
 		}
 
-		log.Printf("Sending audit logs to project: %s in namespace: %s for cluster: %s", teamProjectID, namespace, clusterName)
+		mainLogger.Info(fmt.Sprintf("Sending audit logs to project: %s in namespace: %s for cluster: %s", teamProjectID, namespace, clusterName))
 	}
+
+	mainLogger = mainLogger.With(slog.Any("projectID", teamProjectID), slog.Any("namespace", namespace), slog.Any("clusterName", clusterName))
+
+	logEntries := make(chan map[string]interface{}, auditLogEntryCapacity)
+	logLines := make(chan string, fileLogLinesCapacity)
+
+	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
+	go fileLogger.Log(ctx)
+
+	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, mainLogger.With("component", "tailer"))
 
 	client, err := logging.NewClient(ctx, teamProjectID)
 	if err != nil {
-		log.Fatalf("Failed to create logging client: %v", err)
+		mainLogger.Error("Failed to create logging client", slog.Any("error", err))
+		os.Exit(4)
 	}
 	defer client.Close()
 
-	// Seek to end of file if it exists (don't reprocess old logs on restart)
-	if info, err := logFile.Stat(); err == nil {
-		if info.Size() > 0 {
-			if pos, err := logFile.Seek(0, 2); err != nil {
-				log.Printf("Warning: Failed to seek to end of file: %v", err)
-			} else {
-				log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
-			}
-		} else {
-			log.Printf("Log file is empty - waiting for new log entries")
-		}
-	} else {
-		log.Printf("Warning: Failed to stat log file: %v", err)
-	}
+	auditLogger := auditlogger.NewAuditLogger(logEntries, clusterName, teamProjectID, client, mainLogger)
+	go auditLogger.Log(ctx)
 
-	// Track file info for rotation detection
-	var lastFileInfo os.FileInfo
-	if info, err := logFile.Stat(); err == nil {
-		lastFileInfo = info
-	}
-
-	// Use bufio.Reader for line-by-line reading with better tail support
-	reader := bufio.NewReader(logFile)
-
-	log.Println("Starting log tail...")
-
-	// Log the initial file position
-	if pos, err := logFile.Seek(0, 1); err == nil {
-		log.Printf("Starting at file position: %d", pos)
-	}
-
-	// Ticker to check for log rotation every 5 seconds
-	rotationCheckTicker := time.NewTicker(5 * time.Second)
-	defer rotationCheckTicker.Stop()
-
-	entriesProcessed := 0
-
-	for {
-		// Check for context cancellation
-		select {
-		case <-ctx.Done():
-			log.Println("Context cancelled, stopping log processing")
-			return
-		default:
-		}
-
-		// Non-blocking rotation check
-		select {
-		case <-rotationCheckTicker.C:
-			if rotated, err := checkLogRotation(*logFilePath, lastFileInfo); err != nil {
-				log.Printf("Error checking log rotation: %v", err)
-			} else if rotated {
-				log.Println("Log rotation detected, reopening file...")
-				if err := logFile.Close(); err != nil {
-					log.Printf("Warning: Failed to close old log file: %v", err)
-				}
-
-				// Reopen the file
-				newFile, err := os.Open(*logFilePath)
-				if err != nil {
-					log.Printf("Failed to reopen log file after rotation: %v", err)
-					time.Sleep(time.Second)
-					continue
-				}
-
-				logFile = newFile
-				reader = bufio.NewReader(logFile)
-
-				// Update file info
-				if info, err := logFile.Stat(); err == nil {
-					lastFileInfo = info
-					log.Printf("Successfully reopened log file (new size: %d bytes)", info.Size())
-				}
-			}
-		default:
-			// Don't block on rotation check
-		}
-
-		// Try to read the next line
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				// No more data available right now - wait and retry
-
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			// Other error
-			log.Printf("Read error: %v", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// Successfully read a line
-		line = strings.TrimSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\r") // Handle CRLF
-
-		if line == "" {
-			continue // Skip empty lines
-		}
-
-		// Parse JSON log entry
-		var logEntry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
-			log.Printf("Failed to parse JSON log line: %v", err)
-			continue
-		}
-
-		entriesProcessed++
-		if entriesProcessed == 1 {
-			log.Printf("Successfully read first log entry!")
-		}
-		if entriesProcessed%100 == 0 {
-			log.Printf("Processed %d log entries", entriesProcessed)
-		}
-
-		// Check for context cancellation between processing entries
-		select {
-		case <-ctx.Done():
-			log.Println("Context cancelled, stopping log processing")
-			return
-		default:
-		}
-
-		// Process the log entry
-		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
-			// Send to GCP in background to avoid blocking
-			go func(entry map[string]interface{}) {
-				if err := sendToGCP(client, entry, clusterName, teamProjectID); err != nil {
-					log.Printf("Failed to send audit log: %v", err)
-				}
-			}(logEntry)
-		} else {
-			// Non-audit logs printed to stdout
-			if jsonOutput, err := json.Marshal(logEntry); err == nil {
-				fmt.Println(string(jsonOutput))
-			}
-		}
-	}
+	<-ctx.Done()
 }
 
-func sendToGCP(client *logging.Client, logEntry map[string]interface{}, clusterName, projectID string) error {
-	entryJSON, err := json.Marshal(logEntry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal log entry: %w", err)
-	}
-
-	logger := client.Logger("postgres-audit-log")
-
-	// Extract additional fields for labels
-	labels := make(map[string]string)
-
-	// Add cluster name as database_id
-	labels["databaseId"] = fmt.Sprintf("%s:%s", projectID, clusterName)
-
-	// Extract user from root level
-	if user, ok := logEntry["user"].(string); ok && user != "" {
-		labels["user"] = user
-	}
-
-	// Extract dbname from root level
-	if dbname, ok := logEntry["dbname"].(string); ok && dbname != "" {
-		labels["databaseName"] = dbname
-	}
-
-	// Parse the AUDIT message to extract statement class
-	// Format: "AUDIT: SESSION,15,1,READ,SELECT,,,..."
-	// Fields: type, session_line, statement_id, class, command, ...
-	if message, ok := logEntry["message"].(string); ok {
-		// Split by comma after "AUDIT: "
-		auditPrefix := "AUDIT: "
-		if strings.HasPrefix(message, auditPrefix) {
-			auditData := strings.TrimPrefix(message, auditPrefix)
-			parts := strings.Split(auditData, ",")
-
-			// Extract audit type (SESSION, OBJECT, etc.) - index 0
-			if len(parts) > 0 && parts[0] != "" {
-				labels["auditType"] = parts[0]
-			}
-
-			// Extract statement class (READ, WRITE, etc.) - index 3
-			if len(parts) > 3 && parts[3] != "" {
-				labels["auditClass"] = parts[3]
-			}
-
-			// Extract command (SELECT, INSERT, UPDATE, DELETE, etc.) - index 4
-			if len(parts) > 4 && parts[4] != "" {
-				labels["command"] = parts[4]
-			}
-		}
-	}
-
-	// Extract backend_type if present
-	if backendType, ok := logEntry["backend_type"].(string); ok && backendType != "" {
-		labels["backendType"] = backendType
-	}
-
-	// Create monitored resource with database_id and project_id
-	resource := &mrpb.MonitoredResource{
-		Type: "generic_node",
-		Labels: map[string]string{
-			"location":   "europe-north1",
-			"namespace":  "postgres-audit",
-			"node_id":    fmt.Sprintf("%s:%s", projectID, clusterName),
-			"project_id": projectID,
-		},
-	}
-
-	entry := logging.Entry{
-		Payload:  string(entryJSON),
-		Severity: logging.Info,
-		Labels:   labels,
-		Resource: resource,
-	}
-
-	logger.Log(entry)
-
-	if err := logger.Flush(); err != nil {
-		return fmt.Errorf("failed to flush logger: %w", err)
-	}
-
-	return nil
-}
-
-func handleShutdown(cancel context.CancelFunc) {
+func handleShutdown(cancel context.CancelFunc, logger *slog.Logger) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
-	log.Println("Shutting down gracefully...")
+	logger.Info("Shutting down gracefully...")
 	cancel()
-}
-
-// checkLogRotation detects if the log file has been rotated
-// by comparing file stats (inode on Unix or size decrease)
-func checkLogRotation(filePath string, lastInfo os.FileInfo) (bool, error) {
-	if lastInfo == nil {
-		return false, nil
-	}
-
-	currentInfo, err := os.Stat(filePath)
-	if err != nil {
-		// File doesn't exist, might have been rotated and new one not created yet
-		return true, nil
-	}
-
-	// Check if it's a different file (different inode on Unix systems)
-	if !os.SameFile(lastInfo, currentInfo) {
-		return true, nil
-	}
-
-	// Check if file size decreased (indicates rotation/truncation)
-	if currentInfo.Size() < lastInfo.Size() {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 func getPodInfo(client *kubernetes.Clientset) (namespace, clusterName string, err error) {

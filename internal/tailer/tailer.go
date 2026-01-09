@@ -1,0 +1,239 @@
+package tailer
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	retryInterval        = 5 * time.Second
+	readInterval         = 100 * time.Millisecond
+	truncatedLength      = 200
+	newFileCheckInterval = 1 * time.Minute
+)
+
+type Tailer struct {
+	filePath       string
+	logEntries     chan<- map[string]interface{}
+	logLines       chan<- string
+	internalLogger *slog.Logger
+}
+
+func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger) {
+	newFileCheckTicker := time.NewTicker(newFileCheckInterval)
+	defer newFileCheckTicker.Stop()
+
+	tailers := make(map[string]*Tailer)
+	for {
+		logger.Info("Looking for files matching pattern", slog.Any("pattern", logFilePattern))
+		matches, err := filepath.Glob(logFilePattern)
+		if err != nil {
+			logger.Error("Error listing files", slog.Any("error", err))
+			os.Exit(5)
+		}
+		for _, match := range matches {
+			if _, ok := tailers[match]; !ok {
+				logger.Info("New file found, starting tail", slog.Any("filepath", match))
+				t := NewTailer(match, logEntries, logLines, logger)
+				tailers[match] = t
+				go t.Tail(ctx)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			logger.Info("Context cancelled, stopping processing")
+			return
+		case <-newFileCheckTicker.C:
+			continue
+		}
+	}
+}
+
+func NewTailer(filePath string, logEntries chan<- map[string]interface{}, logLines chan<- string, internalLogger *slog.Logger) *Tailer {
+	return &Tailer{
+		filePath,
+		logEntries,
+		logLines,
+		internalLogger.With(slog.Any("filename", path.Base(filePath))),
+	}
+}
+
+func (t *Tailer) Tail(ctx context.Context) {
+	var err error
+	var logFile *os.File
+	for {
+		logFile, err = os.Open(t.filePath)
+		if err != nil {
+			t.internalLogger.Error("Unable to open file, retrying", slog.Any("error", err), slog.Any("retryInterval", retryInterval))
+			time.Sleep(retryInterval)
+			continue
+		}
+		break
+	}
+	defer logFile.Close()
+
+	// Seek to end of file if it exists (don't reprocess old logs on restart)
+	// Track file info for rotation detection
+	var lastFileInfo os.FileInfo
+	if info, err := logFile.Stat(); err == nil {
+		lastFileInfo = info
+		if info.Size() > 0 {
+			if pos, err := logFile.Seek(0, 2); err != nil {
+				t.internalLogger.Warn("Failed to seek to end of file", slog.Any("error", err))
+			} else {
+				t.internalLogger.Info("Skipping existing log content - only new logs will be processed", slog.Any("file_size_bytes", info.Size()), slog.Any("position", pos))
+			}
+		} else {
+			t.internalLogger.Info("Log file is empty - waiting for new log entries")
+		}
+	} else {
+		t.internalLogger.Warn("Failed to stat log file", slog.Any("error", err))
+	}
+
+	// Use bufio.Reader for line-by-line reading with better tail support
+	reader := bufio.NewReader(logFile)
+
+	t.internalLogger.Info("Starting log tail...")
+
+	// Log the initial file position
+	if pos, err := logFile.Seek(0, 1); err == nil {
+		t.internalLogger.Info(fmt.Sprintf("Starting at file position: %d", pos))
+	}
+
+	// Ticker to check for log rotation every 5 seconds
+	rotationCheckTicker := time.NewTicker(5 * time.Second)
+	defer rotationCheckTicker.Stop()
+
+	entriesProcessed := 0
+
+	for {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			t.internalLogger.Info("Context cancelled, stopping log processing")
+			return
+		default:
+		}
+
+		// Non-blocking rotation check
+		select {
+		case <-rotationCheckTicker.C:
+			if rotated, err := checkLogRotation(t.filePath, lastFileInfo); err != nil {
+				t.internalLogger.Info("Error checking log rotation", slog.Any("error", err))
+			} else if rotated {
+				t.internalLogger.Info("Log rotation detected, reopening file...")
+				if err := logFile.Close(); err != nil {
+					t.internalLogger.Warn("Failed to close old log file", slog.Any("error", err))
+				}
+
+				// Reopen the file
+				newFile, err := os.Open(t.filePath)
+				if err != nil {
+					t.internalLogger.Warn("Failed to reopen log file after rotation", slog.Any("error", err), slog.Any("retryInterval", retryInterval))
+					time.Sleep(retryInterval)
+					continue
+				}
+
+				logFile = newFile
+				reader = bufio.NewReader(logFile)
+
+				// Update file info
+				if info, err := logFile.Stat(); err == nil {
+					lastFileInfo = info
+					t.internalLogger.Info("Successfully reopened log file", slog.Any("new_file_size_bytes", info.Size()))
+				}
+			}
+		default:
+			// Don't block on rotation check
+		}
+
+		// Try to read the next line
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				// No more data available right now - wait and retry
+				time.Sleep(readInterval)
+				continue
+			}
+
+			// Other error
+			t.internalLogger.Warn("Read error", slog.Any("error", err))
+			time.Sleep(readInterval)
+			continue
+		}
+
+		// Successfully read a line
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r") // Handle CRLF
+
+		if line == "" {
+			continue // Skip empty lines
+		}
+
+		// Parse JSON log entry
+		var logEntry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
+			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.Any("truncated_line", line[:truncatedLength]))
+			continue
+		}
+
+		entriesProcessed++
+		if entriesProcessed == 1 {
+			t.internalLogger.Debug("Successfully read first log entry!")
+		}
+		if entriesProcessed%100 == 0 {
+			t.internalLogger.Debug(fmt.Sprintf("Processed %d log entries", entriesProcessed))
+		}
+
+		// Check for context cancellation between processing entries
+		select {
+		case <-ctx.Done():
+			t.internalLogger.Info("Context cancelled, stopping log processing")
+			return
+		default:
+		}
+
+		// Process the log entry
+		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
+			t.logEntries <- logEntry
+		} else {
+			t.logLines <- line
+		}
+	}
+}
+
+// checkLogRotation detects if the log file has been rotated
+// by comparing file stats (inode on Unix or size decrease)
+func checkLogRotation(filePath string, lastInfo os.FileInfo) (bool, error) {
+	if lastInfo == nil {
+		return false, nil
+	}
+
+	currentInfo, err := os.Stat(filePath)
+	if err != nil {
+		// File doesn't exist, might have been rotated and new one not created yet
+		return true, nil
+	}
+
+	// Check if it's a different file (different inode on Unix systems)
+	if !os.SameFile(lastInfo, currentInfo) {
+		return true, nil
+	}
+
+	// Check if file size decreased (indicates rotation/truncation)
+	if currentInfo.Size() < lastInfo.Size() {
+		return true, nil
+	}
+
+	return false, nil
+}
