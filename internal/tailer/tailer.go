@@ -250,9 +250,15 @@ func (t *Tailer) Tail(ctx context.Context) {
 
 		// Process the log entry
 		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
-			t.logEntries <- logEntry
+			select {
+			case t.logEntries <- logEntry:
+			case <-ctx.Done():
+			}
 		} else {
-			t.logLines <- line
+			select {
+			case t.logLines <- line:
+			case <-ctx.Done():
+			}
 		}
 	}
 }
