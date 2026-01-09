@@ -36,7 +36,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		logger.Error("Unable to use fsnotify to watch for filechanges, falling back to ticker")
+		logger.Error("Unable to use fsnotify to watch for file changes, falling back to ticker")
 	} else {
 		dir := path.Dir(logFilePattern)
 		if err := watcher.Add(dir); err != nil {
