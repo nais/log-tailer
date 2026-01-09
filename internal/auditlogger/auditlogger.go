@@ -118,7 +118,8 @@ func (a *AuditLogger) sendToGCP(logEntry map[string]interface{}) error {
 
 	a.googleLogger.Log(entry)
 
-	if err := a.googleLogger.Flush(); err != nil {
+	// Flush after every entry, to ensure it is sent right away to avoid losing entries in the event of crash or unexpected exit
+	if err = a.googleLogger.Flush(); err != nil {
 		return fmt.Errorf("failed to flush logger: %w", err)
 	}
 
