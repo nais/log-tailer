@@ -24,8 +24,6 @@ import (
 func main() {
 	logFilePath := flag.String("log-file", "", "Path to the log file to tail (required)")
 	projectID := flag.String("project-id", "", "GCP project ID (optional, for local testing)")
-	fromBeginning := flag.Bool("from-beginning", false, "Read from the beginning of the file instead of tailing (for testing)")
-	testLastN := flag.Int("test-last-n", 0, "Test mode: read last N entries from file and exit (for debugging)")
 
 	flag.Parse()
 
@@ -40,12 +38,6 @@ func main() {
 	}
 	defer logFile.Close()
 
-	// Test mode: read last N entries and exit
-	if *testLastN > 0 {
-		testReadLastEntries(logFile, *testLastN)
-		return
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,11 +47,6 @@ func main() {
 	var clusterName string
 	var teamProjectID string
 
-	k8sClient, err := getK8sClient()
-	if err != nil {
-		log.Fatalf("Failed to create Kubernetes client: %v", err)
-	}
-
 	// If project-id is provided, use it for local testing
 	if *projectID != "" {
 		teamProjectID = *projectID
@@ -67,6 +54,12 @@ func main() {
 		clusterName = "local-cluster"
 		log.Printf("Running in local mode with project: %s", teamProjectID)
 	} else {
+		// Only create K8s client when running in cluster
+		k8sClient, err := getK8sClient()
+		if err != nil {
+			log.Fatalf("Failed to create Kubernetes client: %v", err)
+		}
+
 		namespace, clusterName, err = getPodInfo(k8sClient)
 		if err != nil {
 			log.Fatalf("Failed to get pod info: %v", err)
@@ -87,25 +80,18 @@ func main() {
 	defer client.Close()
 
 	// Seek to end of file if it exists (don't reprocess old logs on restart)
-	if !*fromBeginning {
-		if info, err := logFile.Stat(); err == nil {
-			if info.Size() > 0 {
-				if pos, err := logFile.Seek(0, 2); err != nil {
-					log.Printf("Warning: Failed to seek to end of file: %v", err)
-				} else {
-					log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
-					// Note: We're now at the end of the file, which might be in the middle of a line
-					// The scanner will wait for the next complete line (ending with \n)
-					// This is correct behavior - we'll catch the next complete log entry
-				}
+	if info, err := logFile.Stat(); err == nil {
+		if info.Size() > 0 {
+			if pos, err := logFile.Seek(0, 2); err != nil {
+				log.Printf("Warning: Failed to seek to end of file: %v", err)
 			} else {
-				log.Printf("Log file is empty - waiting for new log entries")
+				log.Printf("Skipping existing log content (file size: %d bytes, position: %d) - only new logs will be processed", info.Size(), pos)
 			}
 		} else {
-			log.Printf("Warning: Failed to stat log file: %v", err)
+			log.Printf("Log file is empty - waiting for new log entries")
 		}
 	} else {
-		log.Printf("Reading from beginning of file (--from-beginning flag set)")
+		log.Printf("Warning: Failed to stat log file: %v", err)
 	}
 
 	// Track file info for rotation detection
@@ -114,13 +100,8 @@ func main() {
 		lastFileInfo = info
 	}
 
-	// Use bufio.Scanner for efficient line-by-line reading
-	scanner := bufio.NewScanner(logFile)
-
-	// Increase buffer size to handle large log lines (default is 64KB)
-	const maxScanTokenSize = 1024 * 1024 // 1MB
-	buf := make([]byte, maxScanTokenSize)
-	scanner.Buffer(buf, maxScanTokenSize)
+	// Use bufio.Reader for line-by-line reading with better tail support
+	reader := bufio.NewReader(logFile)
 
 	log.Println("Starting log tail...")
 
@@ -128,10 +109,6 @@ func main() {
 	if pos, err := logFile.Seek(0, 1); err == nil {
 		log.Printf("Starting at file position: %d", pos)
 	}
-
-	// Track activity for debugging
-	lastStatusLog := time.Now()
-	scanAttempts := 0
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
@@ -168,7 +145,7 @@ func main() {
 				}
 
 				logFile = newFile
-				scanner = bufio.NewScanner(logFile)
+				reader = bufio.NewReader(logFile)
 
 				// Update file info
 				if info, err := logFile.Stat(); err == nil {
@@ -180,76 +157,66 @@ func main() {
 			// Don't block on rotation check
 		}
 
-		// Try to scan the next line
-		if scanner.Scan() {
-			line := scanner.Text()
-			scanAttempts = 0 // Reset counter on successful scan
+		// Try to read the next line
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				// No more data available right now - wait and retry
 
-			// Parse JSON log entry
-			var logEntry map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
-				log.Printf("Failed to parse JSON log line: %v", err)
-				continue
-			}
-
-			entriesProcessed++
-			if entriesProcessed == 1 {
-				log.Printf("Successfully read first log entry!")
-			}
-			if entriesProcessed%100 == 0 {
-				log.Printf("Processed %d log entries", entriesProcessed)
-			}
-
-			// Check for context cancellation between processing entries
-			select {
-			case <-ctx.Done():
-				log.Println("Context cancelled, stopping log processing")
-				return
-			default:
-			}
-
-			// Process the log entry
-			if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
-				// Send to GCP in background to avoid blocking
-				go func(entry map[string]interface{}) {
-					if err := sendToGCP(client, entry, clusterName, teamProjectID); err != nil {
-						log.Printf("Failed to send audit log: %v", err)
-					}
-				}(logEntry)
-			} else {
-				// Non-audit logs printed to stdout
-				if jsonOutput, err := json.Marshal(logEntry); err == nil {
-					fmt.Println(string(jsonOutput))
-				}
-			}
-		} else {
-			// No more lines available - check for errors
-			if err := scanner.Err(); err != nil {
-				log.Printf("Scanner error: %v", err)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 
-			// EOF reached, wait for new data (tail behavior)
-			scanAttempts++
-
-			// Log status every 10 seconds when we're waiting
-			if time.Since(lastStatusLog) > 10*time.Second {
-				if info, err := logFile.Stat(); err == nil {
-					pos, _ := logFile.Seek(0, 1)
-					remaining := info.Size() - pos
-					log.Printf("Waiting for new data: file size=%d, position=%d, remaining=%d bytes, scan attempts=%d, entries=%d",
-						info.Size(), pos, remaining, scanAttempts, entriesProcessed)
-
-					// If there's remaining data but we're not reading it, that's a problem
-					if remaining > 0 {
-						log.Printf("WARNING: File has %d bytes remaining but scanner returned false - possible partial line issue", remaining)
-					}
-				}
-				lastStatusLog = time.Now()
-			}
-
+			// Other error
+			log.Printf("Read error: %v", err)
 			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		// Successfully read a line
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r") // Handle CRLF
+
+		if line == "" {
+			continue // Skip empty lines
+		}
+
+		// Parse JSON log entry
+		var logEntry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
+			log.Printf("Failed to parse JSON log line: %v", err)
+			continue
+		}
+
+		entriesProcessed++
+		if entriesProcessed == 1 {
+			log.Printf("Successfully read first log entry!")
+		}
+		if entriesProcessed%100 == 0 {
+			log.Printf("Processed %d log entries", entriesProcessed)
+		}
+
+		// Check for context cancellation between processing entries
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping log processing")
+			return
+		default:
+		}
+
+		// Process the log entry
+		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
+			// Send to GCP in background to avoid blocking
+			go func(entry map[string]interface{}) {
+				if err := sendToGCP(client, entry, clusterName, teamProjectID); err != nil {
+					log.Printf("Failed to send audit log: %v", err)
+				}
+			}(logEntry)
+		} else {
+			// Non-audit logs printed to stdout
+			if jsonOutput, err := json.Marshal(logEntry); err == nil {
+				fmt.Println(string(jsonOutput))
+			}
 		}
 	}
 }
@@ -422,63 +389,4 @@ func getK8sClient() (*kubernetes.Clientset, error) {
 	}
 
 	return clientset, nil
-}
-
-// testReadLastEntries reads approximately the last N entries from the file for debugging
-func testReadLastEntries(file *os.File, n int) {
-	log.Printf("Test mode: attempting to read last %d entries from file", n)
-
-	// Get file size
-	info, err := file.Stat()
-	if err != nil {
-		log.Fatalf("Failed to stat file: %v", err)
-	}
-
-	fileSize := info.Size()
-	log.Printf("File size: %d bytes", fileSize)
-
-	// Start from a position that's likely to contain the last N entries
-	// Assume average entry is ~500 bytes, seek back n*1000 bytes to be safe
-	seekPos := fileSize - int64(n*1000)
-	if seekPos < 0 {
-		seekPos = 0
-	}
-
-	if _, err := file.Seek(seekPos, 0); err != nil {
-		log.Fatalf("Failed to seek: %v", err)
-	}
-
-	log.Printf("Seeking to position: %d", seekPos)
-
-	decoder := json.NewDecoder(file)
-	entries := make([]map[string]interface{}, 0, n)
-
-	// Read all entries from this position
-	for {
-		var entry map[string]interface{}
-		if err := decoder.Decode(&entry); err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Printf("Decode error: %v", err)
-			// Try to skip to next line
-			continue
-		}
-		entries = append(entries, entry)
-	}
-
-	totalRead := len(entries)
-	log.Printf("Read %d total entries from position %d", totalRead, seekPos)
-
-	// Print the last N entries
-	start := 0
-	if totalRead > n {
-		start = totalRead - n
-	}
-
-	log.Printf("Displaying last %d entries:", len(entries[start:]))
-	for i, entry := range entries[start:] {
-		jsonBytes, _ := json.MarshalIndent(entry, "", "  ")
-		log.Printf("\n=== Entry %d ===\n%s\n", i+1, string(jsonBytes))
-	}
 }

@@ -191,6 +191,41 @@ docker run --rm \
 
 **Note**: When running locally with `-project-id`, the application will not attempt to connect to the Kubernetes API, making it suitable for testing without cluster access. You'll need to mount your GCP credentials file as shown above.
 
+## Testing
+
+### Interactive Test Script
+
+Use the interactive test script to manually verify the log-tailer works correctly:
+
+```bash
+./interactive_test.sh
+```
+
+**What it does:**
+- Creates a clean test log file
+- Starts the log-tailer in the background
+- Provides an interactive menu to add log entries in real-time
+- Shows tailer output to verify logs are being processed
+
+**Commands:**
+- `1` - Add a regular log entry
+- `2` - Add an AUDIT log entry  
+- `3` - Add 5 regular entries quickly
+- `4` - Add 5 AUDIT entries quickly
+- `5` - Show tailer output (last 30 lines)
+- `6` - Show test file size and line count
+- `q` - Quit and cleanup
+
+**Expected behavior:**
+- Regular logs appear in stdout as JSON
+- AUDIT logs are sent to GCP Cloud Logging (permission errors are normal in local testing without proper credentials)
+- The tailer automatically skips existing content and only processes newly added entries
+
+This is useful for:
+- Verifying the tailer correctly detects and reads new log entries
+- Testing the AUDIT log detection and routing logic
+- Debugging tailing behavior with realistic log data
+
 ## Development
 
 Uses [mise](https://mise.jdx.dev/) for tooling:
