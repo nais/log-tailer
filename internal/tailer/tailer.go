@@ -30,48 +30,70 @@ type Tailer struct {
 	internalLogger *slog.Logger
 }
 
-func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger) {
-	newFileCheckTicker := time.NewTicker(newFileCheckInterval)
-	defer newFileCheckTicker.Stop()
+func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, quit chan<- error, logger *slog.Logger) {
+	tailers := make(map[string]*Tailer)
+	err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+	if err != nil {
+		quit <- err
+		return
+	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		logger.Error("Unable to use fsnotify to watch for file changes, falling back to ticker")
+		newFileCheckTicker := time.NewTicker(newFileCheckInterval)
+		defer newFileCheckTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info("Context cancelled, stopping processing")
+				return
+			case <-newFileCheckTicker.C:
+				logger.Info("Ticker ticked")
+				err = lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+				if err != nil {
+					quit <- err
+					return
+				}
+			}
+		}
 	} else {
 		dir := path.Dir(logFilePattern)
-		if err := watcher.Add(dir); err != nil {
+		if err = watcher.Add(dir); err != nil {
 			logger.Error("Error creating watch for directory", slog.Any("error", err), slog.Any("directory", dir))
 		}
 		defer watcher.Close()
-	}
 
-	tailers := make(map[string]*Tailer)
-	lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("Context cancelled, stopping processing")
-			return
-		case <-newFileCheckTicker.C:
-			logger.Info("Ticker ticked")
-			lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
-		case event := <-watcher.Events:
-			if event.Has(fsnotify.Create) {
-				logger.Info("Fsnotify sent event")
-				lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Info("Context cancelled, stopping processing")
+				return
+			case event := <-watcher.Events:
+				if event.Has(fsnotify.Create) {
+					logger.Debug("Fsnotify sent event", slog.Any("event", event))
+					err = lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+					if err != nil {
+						quit <- err
+						return
+					}
+				}
+			case err = <-watcher.Errors:
+				logger.Error("Error watching files", slog.Any("error", err))
+				quit <- err
+				return
 			}
-		case err := <-watcher.Errors:
-			logger.Error("Error watching files", slog.Any("error", err))
 		}
 	}
 }
 
-func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) {
+func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
 	logger.Info("Looking for files matching pattern", slog.Any("pattern", logFilePattern))
 	matches, err := filepath.Glob(logFilePattern)
 	if err != nil {
 		logger.Error("Error listing files", slog.Any("error", err))
-		os.Exit(5)
+		return err
 	}
 	for _, match := range matches {
 		if _, ok := tailers[match]; !ok {
@@ -81,6 +103,7 @@ func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- 
 			go t.Tail(ctx)
 		}
 	}
+	return nil
 }
 
 func NewTailer(filePath string, logEntries chan<- map[string]interface{}, logLines chan<- string, internalLogger *slog.Logger) *Tailer {

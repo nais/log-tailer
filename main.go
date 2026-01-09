@@ -77,13 +77,14 @@ func main() {
 
 	mainLogger = mainLogger.With(slog.Any("projectID", teamProjectID), slog.Any("namespace", namespace), slog.Any("clusterName", clusterName))
 
+	quit := make(chan error)
 	logEntries := make(chan map[string]interface{}, auditLogEntryCapacity)
 	logLines := make(chan string, fileLogLinesCapacity)
 
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
 	go fileLogger.Log(ctx)
 
-	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, mainLogger.With("component", "tailer"))
+	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, quit, mainLogger.With(slog.Any("component", "tailer")))
 
 	client, err := logging.NewClient(ctx, teamProjectID)
 	if err != nil {
@@ -95,7 +96,12 @@ func main() {
 	auditLogger := auditlogger.NewAuditLogger(logEntries, clusterName, teamProjectID, client, mainLogger)
 	go auditLogger.Log(ctx)
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err = <-quit:
+		mainLogger.Error("Error during processing of logs", slog.Any("error", err))
+		os.Exit(100)
+	}
 }
 
 func handleShutdown(cancel context.CancelFunc, logger *slog.Logger) {
