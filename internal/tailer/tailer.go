@@ -175,9 +175,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 		// Non-blocking rotation check
 		select {
 		case <-rotationCheckTicker.C:
-			if rotated, err := checkLogRotation(t.filePath, lastFileInfo); err != nil {
-				t.internalLogger.Info("Error checking log rotation", slog.Any("error", err))
-			} else if rotated {
+			if checkLogRotation(t.filePath, lastFileInfo) {
 				t.internalLogger.Info("Log rotation detected, reopening file...")
 				if err := logFile.Close(); err != nil {
 					t.internalLogger.Warn("Failed to close old log file", slog.Any("error", err))
@@ -265,26 +263,26 @@ func (t *Tailer) Tail(ctx context.Context) {
 
 // checkLogRotation detects if the log file has been rotated
 // by comparing file stats (inode on Unix or size decrease)
-func checkLogRotation(filePath string, lastInfo os.FileInfo) (bool, error) {
+func checkLogRotation(filePath string, lastInfo os.FileInfo) bool {
 	if lastInfo == nil {
-		return false, nil
+		return false
 	}
 
 	currentInfo, err := os.Stat(filePath)
 	if err != nil {
 		// File doesn't exist, might have been rotated and new one not created yet
-		return true, nil
+		return true
 	}
 
 	// Check if it's a different file (different inode on Unix systems)
 	if !os.SameFile(lastInfo, currentInfo) {
-		return true, nil
+		return true
 	}
 
 	// Check if file size decreased (indicates rotation/truncation)
 	if currentInfo.Size() < lastInfo.Size() {
-		return true, nil
+		return true
 	}
 
-	return false, nil
+	return false
 }
