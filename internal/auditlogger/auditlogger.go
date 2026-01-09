@@ -13,15 +13,17 @@ import (
 
 type AuditLogger struct {
 	logEntries   <-chan map[string]interface{}
+	quit         chan<- error
 	clusterName  string
 	projectID    string
 	googleLogger *logging.Logger
 	logger       *slog.Logger
 }
 
-func NewAuditLogger(logEntries <-chan map[string]interface{}, clusterName, projectID string, googleLoggingClient *logging.Client, logger *slog.Logger) *AuditLogger {
+func NewAuditLogger(logEntries <-chan map[string]interface{}, quit chan<- error, clusterName, projectID string, googleLoggingClient *logging.Client, logger *slog.Logger) *AuditLogger {
 	return &AuditLogger{
 		logEntries,
+		quit,
 		clusterName,
 		projectID,
 		googleLoggingClient.Logger("postgres-audit-log"),
@@ -39,6 +41,8 @@ func (a *AuditLogger) Log(ctx context.Context) {
 		case logEntry := <-a.logEntries:
 			if err := a.sendToGCP(logEntry); err != nil {
 				a.logger.Error("Error sending audit log to GCP", slog.Any("error", err))
+				a.quit <- err
+				return
 			}
 		}
 	}

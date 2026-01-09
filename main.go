@@ -93,7 +93,13 @@ func main() {
 	}
 	defer client.Close()
 
-	auditLogger := auditlogger.NewAuditLogger(logEntries, clusterName, teamProjectID, client, mainLogger)
+	err = client.Ping(ctx)
+	if err != nil {
+		mainLogger.Error("Failed to ping google logging service", slog.Any("error", err))
+		os.Exit(5)
+	}
+
+	auditLogger := auditlogger.NewAuditLogger(logEntries, quit, clusterName, teamProjectID, client, mainLogger)
 	go auditLogger.Log(ctx)
 
 	select {
