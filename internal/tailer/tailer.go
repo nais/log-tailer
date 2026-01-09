@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -150,12 +149,9 @@ func (t *Tailer) Tail(ctx context.Context) {
 	// Use bufio.Reader for line-by-line reading with better tail support
 	reader := bufio.NewReader(logFile)
 
-	t.internalLogger.Info("Starting log tail...")
-
 	// Log the initial file position
-	if pos, err := logFile.Seek(0, 1); err == nil {
-		t.internalLogger.Info(fmt.Sprintf("Starting at file position: %d", pos))
-	}
+	pos, _ := logFile.Seek(0, 1)
+	t.internalLogger.Info("Start tailing file", slog.Any("position", pos))
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
@@ -177,7 +173,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 		case <-rotationCheckTicker.C:
 			if checkLogRotation(t.filePath, lastFileInfo) {
 				t.internalLogger.Info("Log rotation detected, reopening file...")
-				if err := logFile.Close(); err != nil {
+				if err = logFile.Close(); err != nil {
 					t.internalLogger.Warn("Failed to close old log file", slog.Any("error", err))
 				}
 
@@ -241,7 +237,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 			t.internalLogger.Debug("Successfully read first log entry!")
 		}
 		if entriesProcessed%100 == 0 {
-			t.internalLogger.Debug(fmt.Sprintf("Processed %d log entries", entriesProcessed))
+			t.internalLogger.Debug("Processing ...", slog.Any("entriesProcessed", entriesProcessed))
 		}
 
 		// Check for context cancellation between processing entries
