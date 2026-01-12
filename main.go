@@ -2,17 +2,19 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"log-tailer/internal/auditlogger"
-	"log-tailer/internal/filelogger"
-	"log-tailer/internal/tailer"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"log-tailer/internal/auditlogger"
+	"log-tailer/internal/filelogger"
+	"log-tailer/internal/tailer"
+
 	"cloud.google.com/go/logging"
+	"github.com/spf13/cobra"
+	"google.golang.org/api/option"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -24,18 +26,34 @@ const (
 )
 
 func main() {
-	logFilePath := flag.String("log-file", "", "Glob pattern to the log file to tail (required)")
-	projectID := flag.String("project-id", "", "GCP project ID (optional, for local testing)")
+	var projectID string
 
-	flag.Parse()
+	var rootCmd = &cobra.Command{
+		Use:   "log-tailer <log-file-pattern>",
+		Short: "log-tailer tails JSON logs from Postgres, and ships audit-logs to a Google logging sink.",
+		Long: `Log-tailer tails JSON logs from Postgres and ships audit-logs to a Google 
+logging sink based on the project annotation on the namespace it is running in.
+Non audit-log messages are printed unmodified to stdout.
+The tool itself might emit logging on stderr.
 
-	mainLogger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-
-	if *logFilePath == "" {
-		flag.Usage()
-		mainLogger.Error("Flag -log-file is required")
-		os.Exit(1)
+Arguments:
+  log-file-pattern		Glob-pattern for the files to tail
+		`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			mainFunc(args[0], projectID)
+		},
 	}
+	rootCmd.Flags().StringVar(&projectID, "project-id", "", "GCP project ID (optional, for local testing)")
+
+	err := rootCmd.Execute()
+	if err != nil {
+		os.Exit(101)
+	}
+}
+
+func mainFunc(logFilePath, projectID string) {
+	mainLogger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -47,8 +65,8 @@ func main() {
 	var teamProjectID string
 
 	// If project-id is provided, use it for local testing
-	if *projectID != "" {
-		teamProjectID = *projectID
+	if projectID != "" {
+		teamProjectID = projectID
 		namespace = "local"
 		clusterName = "local-cluster"
 		mainLogger.Info("Running in local mode", slog.String("projectID", teamProjectID))
@@ -83,7 +101,7 @@ func main() {
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
 	go fileLogger.Log(ctx)
 
-	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
+	go tailer.Watch(ctx, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
 	client, err := logging.NewClient(ctx, teamProjectID)
 	if err != nil {

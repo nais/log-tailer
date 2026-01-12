@@ -50,7 +50,7 @@ fi
 # Start the log tailer in the background with the glob pattern
 LOG_TAILER_OUT="/tmp/tailer_output.log"
 echo -e "${BLUE}Starting log-tailer in background (glob: $LOG_GLOB)...${NC}"
-bin/log-tailer --log-file="$LOG_GLOB" --project-id="$PROJECT_ID" > "$LOG_TAILER_OUT" 2>&1 &
+bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" > "$LOG_TAILER_OUT" 2>&1 &
 TAILER_PID=$!
 
 # Function to cleanup on exit
