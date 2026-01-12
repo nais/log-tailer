@@ -63,12 +63,14 @@ func mainFunc(logFilePath, projectID string) {
 	var namespace string
 	var clusterName string
 	var teamProjectID string
+	localMode := false
 
 	// If project-id is provided, use it for local testing
 	if projectID != "" {
 		teamProjectID = projectID
 		namespace = "local"
 		clusterName = "local-cluster"
+		localMode = true
 		mainLogger.Info("Running in local mode", slog.String("projectID", teamProjectID))
 	} else {
 		// Only create K8s client when running in cluster
@@ -111,10 +113,12 @@ func mainFunc(logFilePath, projectID string) {
 	}
 	defer client.Close()
 
-	err = client.Ping(ctx)
-	if err != nil {
-		mainLogger.Error("Failed to ping google logging service", slog.Any("error", err))
-		os.Exit(5)
+	if !localMode {
+		err = client.Ping(ctx)
+		if err != nil {
+			mainLogger.Error("Failed to ping google logging service", slog.Any("error", err))
+			os.Exit(5)
+		}
 	}
 
 	auditLogger := auditlogger.NewAuditLogger(logEntries, quit, clusterName, teamProjectID, client, mainLogger)
