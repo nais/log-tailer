@@ -272,8 +272,12 @@ func checkLogRotation(filePath string, lastInfo os.FileInfo) bool {
 
 	currentInfo, err := os.Stat(filePath)
 	if err != nil {
-		// File doesn't exist, might have been rotated and new one not created yet
-		return true
+		if os.IsNotExist(err) {
+			// File doesn't exist, might have been rotated and new one not created yet
+			return true
+		}
+		// Some other issue, assume it is temporary and that we will be able to continue reading or doing stat on next tick
+		return false
 	}
 
 	// Check if it's a different file (different inode on Unix systems)
