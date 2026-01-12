@@ -103,7 +103,8 @@ func mainFunc(logFilePath, projectID string) {
 
 	go tailer.Watch(ctx, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
-	client, err := logging.NewClient(ctx, teamProjectID)
+	googleLoggingClientLogger := mainLogger.With(slog.String("component", "google-logging-client"))
+	client, err := logging.NewClient(ctx, teamProjectID, option.WithLogger(googleLoggingClientLogger))
 	if err != nil {
 		mainLogger.Error("Failed to create logging client", slog.Any("error", err))
 		os.Exit(4)
