@@ -51,7 +51,7 @@ func main() {
 		teamProjectID = *projectID
 		namespace = "local"
 		clusterName = "local-cluster"
-		mainLogger.Info("Running in local mode", slog.Any("projectID", teamProjectID))
+		mainLogger.Info("Running in local mode", slog.String("projectID", teamProjectID))
 	} else {
 		// Only create K8s client when running in cluster
 		k8sClient, err := getK8sClient()
@@ -71,11 +71,10 @@ func main() {
 			mainLogger.Error("Failed to get project ID", slog.Any("error", err))
 			os.Exit(2)
 		}
-
-		mainLogger.Info(fmt.Sprintf("Sending audit logs to project: %s in namespace: %s for cluster: %s", teamProjectID, namespace, clusterName))
 	}
 
-	mainLogger = mainLogger.With(slog.Any("projectID", teamProjectID), slog.Any("namespace", namespace), slog.Any("clusterName", clusterName))
+	mainLogger = mainLogger.With(slog.String("projectID", teamProjectID), slog.String("namespace", namespace), slog.String("clusterName", clusterName))
+	mainLogger.Info("Sending audit logs to project")
 
 	quit := make(chan error)
 	logEntries := make(chan map[string]interface{}, auditLogEntryCapacity)
@@ -84,7 +83,7 @@ func main() {
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
 	go fileLogger.Log(ctx)
 
-	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, quit, mainLogger.With(slog.Any("component", "tailer")))
+	go tailer.Watch(ctx, *logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
 	client, err := logging.NewClient(ctx, teamProjectID)
 	if err != nil {

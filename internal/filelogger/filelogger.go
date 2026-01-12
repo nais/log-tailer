@@ -14,7 +14,7 @@ type FileLogger struct {
 func NewFileLogger(logLines <-chan string, logger *slog.Logger) *FileLogger {
 	return &FileLogger{
 		logLines,
-		logger.With(slog.Any("component", "fileLogger")),
+		logger.With(slog.String("component", "fileLogger")),
 	}
 }
 

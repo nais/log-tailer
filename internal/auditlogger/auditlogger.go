@@ -27,7 +27,7 @@ func NewAuditLogger(logEntries <-chan map[string]interface{}, quit chan<- error,
 		clusterName,
 		projectID,
 		googleLoggingClient.Logger("postgres-audit-log"),
-		logger.With(slog.Any("component", "auditLogger")),
+		logger.With(slog.String("component", "auditLogger")),
 	}
 }
 

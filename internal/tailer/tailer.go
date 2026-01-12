@@ -60,7 +60,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 	} else {
 		dir := path.Dir(logFilePattern)
 		if err = watcher.Add(dir); err != nil {
-			logger.Error("Error creating watch for directory", slog.Any("error", err), slog.Any("directory", dir))
+			logger.Error("Error creating watch for directory", slog.Any("error", err), slog.String("directory", dir))
 		}
 		defer watcher.Close()
 
@@ -88,7 +88,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 }
 
 func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
-	logger.Info("Looking for files matching pattern", slog.Any("pattern", logFilePattern))
+	logger.Info("Looking for files matching pattern", slog.String("pattern", logFilePattern))
 	matches, err := filepath.Glob(logFilePattern)
 	if err != nil {
 		logger.Error("Error listing files", slog.Any("error", err))
@@ -96,7 +96,7 @@ func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- 
 	}
 	for _, match := range matches {
 		if _, ok := tailers[match]; !ok {
-			logger.Info("New file found, starting tail", slog.Any("filepath", match))
+			logger.Info("New file found, starting tail", slog.String("filepath", match))
 			t := NewTailer(match, logEntries, logLines, logger)
 			tailers[match] = t
 			go t.Tail(ctx)
@@ -110,7 +110,7 @@ func NewTailer(filePath string, logEntries chan<- map[string]interface{}, logLin
 		filePath,
 		logEntries,
 		logLines,
-		internalLogger.With(slog.Any("filename", path.Base(filePath))),
+		internalLogger.With(slog.String("filename", path.Base(filePath))),
 	}
 }
 
@@ -137,7 +137,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 			if pos, err := logFile.Seek(0, 2); err != nil {
 				t.internalLogger.Warn("Failed to seek to end of file", slog.Any("error", err))
 			} else {
-				t.internalLogger.Info("Skipping existing log content - only new logs will be processed", slog.Any("file_size_bytes", info.Size()), slog.Any("position", pos))
+				t.internalLogger.Info("Skipping existing log content - only new logs will be processed", slog.Int64("file_size_bytes", info.Size()), slog.Int64("position", pos))
 			}
 		} else {
 			t.internalLogger.Info("Log file is empty - waiting for new log entries")
@@ -151,7 +151,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 
 	// Log the initial file position
 	pos, _ := logFile.Seek(0, 1)
-	t.internalLogger.Info("Start tailing file", slog.Any("position", pos))
+	t.internalLogger.Info("Start tailing file", slog.Int64("position", pos))
 
 	// Ticker to check for log rotation every 5 seconds
 	rotationCheckTicker := time.NewTicker(5 * time.Second)
@@ -191,7 +191,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 				// Update file info
 				if info, err := logFile.Stat(); err == nil {
 					lastFileInfo = info
-					t.internalLogger.Info("Successfully reopened log file", slog.Any("new_file_size_bytes", info.Size()))
+					t.internalLogger.Info("Successfully reopened log file", slog.Int64("new_file_size_bytes", info.Size()))
 				}
 			}
 		default:
@@ -228,7 +228,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 			if len(truncatedLine) > truncatedLength {
 				truncatedLine = truncatedLine[:truncatedLength]
 			}
-			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.Any("truncated_line", truncatedLine))
+			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.String("truncated_line", truncatedLine))
 			continue
 		}
 
@@ -237,7 +237,7 @@ func (t *Tailer) Tail(ctx context.Context) {
 			t.internalLogger.Debug("Successfully read first log entry!")
 		}
 		if entriesProcessed%100 == 0 {
-			t.internalLogger.Debug("Processing ...", slog.Any("entriesProcessed", entriesProcessed))
+			t.internalLogger.Debug("Processing ...", slog.Int("entriesProcessed", entriesProcessed))
 		}
 
 		// Check for context cancellation between processing entries
