@@ -18,7 +18,7 @@ run = "gofumpt -w ."
 run = "govulncheck ./..."
 
 [tasks.security]
-run = "gosec ./..."
+run = "gosec -quiet ./..."
 
 [tasks.test]
 run = "go test ./..."
@@ -30,4 +30,4 @@ run = "go build -o bin/log-tailer ."
 depends = ["test", "lint", "format", "vulncheck", "security"]
 
 [tasks.check]
-depends = ["test", "lint", "vulncheck", "security"]
+depends = ["test", "lint", "vulncheck", "security", "test-automated"]
