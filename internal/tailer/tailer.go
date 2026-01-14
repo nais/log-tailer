@@ -148,14 +148,6 @@ func (t *Tailer) Tail(ctx context.Context) {
 				continue
 			}
 
-			// Check for context cancellation between processing entries
-			select {
-			case <-ctx.Done():
-				t.internalLogger.Info("Context cancelled, stopping log processing")
-				return
-			default:
-			}
-
 			// Process the log entry
 			if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
 				select {
