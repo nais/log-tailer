@@ -60,7 +60,14 @@ if [ "$VERBOSE" = true ]; then
 fi
 bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" --dry-run >"$LOG_TAILER_OUT" 2>&1 &
 TAILER_PID=$!
-sleep 1
+
+# Wait for tailer to start watching files
+for i in {1..10}; do
+	if grep -q "Looking for files matching pattern" "$LOG_TAILER_OUT" 2>/dev/null; then
+		break
+	fi
+	sleep 0.5
+done
 
 SHOW_OUTPUT_ON_EXIT=false
 
@@ -95,8 +102,10 @@ add_log_entry() {
 	local dbname=$3
 	local message=$4
 	local backend_type=${5:-"client backend"}
+	local timestamp
+	timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-	echo "{\"timestamp\": \"2024-01-01T00:00:00Z\", \"user\": \"$user\", \"dbname\": \"$dbname\", \"message\": \"$message\", \"backend_type\": \"$backend_type\"}" >>"$file"
+	echo "{\"timestamp\": \"$timestamp\", \"user\": \"$user\", \"dbname\": \"$dbname\", \"message\": \"$message\", \"backend_type\": \"$backend_type\"}" >>"$file"
 }
 
 log_verbose() {
@@ -175,7 +184,9 @@ check_output_contains "Rapid entry 5 captured" "Rapid entry number 5" || true
 
 # Test 8: File truncation
 log_verbose "${YELLOW}Test 8: File truncation${NC}"
-TRUNCATE_FILE="${LOG_FILES[0]}"
+TRUNCATE_FILE="${TEMP_DIR}/test_postgres_truncate.log"
+touch "$TRUNCATE_FILE"
+sleep 1
 add_log_entry "$TRUNCATE_FILE" "truncuser" "truncdb" "Entry before truncation MARKER_BEFORE_TRUNCATE"
 check_output_contains "Entry before truncation captured" "MARKER_BEFORE_TRUNCATE" || true
 : >"$TRUNCATE_FILE"
@@ -184,7 +195,9 @@ check_output_contains "Entry after truncation captured" "MARKER_AFTER_TRUNCATE" 
 
 # Test 9: File deletion and re-creation (same name)
 log_verbose "${YELLOW}Test 9: File deletion and re-creation (same name)${NC}"
-RECREATE_FILE="${LOG_FILES[1]}"
+RECREATE_FILE="${TEMP_DIR}/test_postgres_recreate.log"
+touch "$RECREATE_FILE"
+sleep 1
 add_log_entry "$RECREATE_FILE" "recreateuser" "recreatedb" "Entry before deletion MARKER_BEFORE_DELETE"
 check_output_contains "Entry before deletion captured" "MARKER_BEFORE_DELETE" || true
 rm "$RECREATE_FILE"
@@ -194,7 +207,9 @@ check_output_contains "Entry after re-creation captured" "MARKER_AFTER_RECREATE"
 
 # Test 10: File deletion and creation (new name)
 log_verbose "${YELLOW}Test 10: File deletion and creation (new name)${NC}"
-DELETE_FILE="${LOG_FILES[2]}"
+DELETE_FILE="${TEMP_DIR}/test_postgres_delete.log"
+touch "$DELETE_FILE"
+sleep 1
 add_log_entry "$DELETE_FILE" "deleteuser" "deletedb" "Entry in file to be deleted MARKER_DELETED_FILE"
 check_output_contains "Entry in deleted file captured" "MARKER_DELETED_FILE" || true
 rm "$DELETE_FILE"
@@ -208,6 +223,17 @@ log_verbose "${BLUE}=== Test Summary ===${NC}"
 log_verbose "${GREEN}Passed: $TESTS_PASSED${NC}"
 log_verbose "${RED}Failed: $TESTS_FAILED${NC}"
 log_verbose ""
+
+if [ "$VERBOSE" = true ]; then
+	log_verbose "${BLUE}=== Log File Contents ===${NC}"
+	for file in "${LOG_FILES[@]}" "$NEW_FILE" "$TRUNCATE_FILE" "$RECREATE_FILE" "$REPLACEMENT_FILE"; do
+		if [ -f "$file" ]; then
+			log_verbose "${YELLOW}$file:${NC}"
+			cat "$file"
+			log_verbose ""
+		fi
+	done
+fi
 
 if [ $TESTS_FAILED -gt 0 ]; then
 	SHOW_OUTPUT_ON_EXIT=true
