@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -171,34 +170,4 @@ func (t *Tailer) Tail(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// checkLogRotation detects if the log file has been rotated
-// by comparing file stats (inode on Unix or size decrease)
-func checkLogRotation(filePath string, lastInfo os.FileInfo) bool {
-	if lastInfo == nil {
-		return false
-	}
-
-	currentInfo, err := os.Stat(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// File doesn't exist, might have been rotated and new one not created yet
-			return true
-		}
-		// Some other issue, assume it is temporary and that we will be able to continue reading or doing stat on next tick
-		return false
-	}
-
-	// Check if it's a different file (different inode on Unix systems)
-	if !os.SameFile(lastInfo, currentInfo) {
-		return true
-	}
-
-	// Check if file size decreased (indicates rotation/truncation)
-	if currentInfo.Size() < lastInfo.Size() {
-		return true
-	}
-
-	return false
 }
