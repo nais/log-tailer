@@ -1,10 +1,9 @@
 package tailer
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log/slog"
 	"os"
 	"path"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SEKOIA-IO/tail"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -22,72 +22,59 @@ const (
 	newFileCheckInterval = 1 * time.Minute
 )
 
+// Tailer tails a single log file and sends parsed log entries to channels
 type Tailer struct {
+	tail *tail.Tail
+
 	filePath       string
-	logEntries     chan<- map[string]interface{}
+	logEntries     chan<- map[string]any
 	logLines       chan<- string
 	internalLogger *slog.Logger
 }
 
-func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, quit chan<- error, logger *slog.Logger) {
+func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, quit chan<- error, logger *slog.Logger) {
 	tailers := make(map[string]*Tailer)
-	err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
+
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		quit <- fmt.Errorf("fsnotify.NewWatcher() failed: %w", err)
+		return
+	}
+	defer watcher.Close()
+
+	dir := path.Dir(logFilePattern)
+	if err = watcher.Add(dir); err != nil {
+		quit <- fmt.Errorf("error creating watch for directory(%q): %w", dir, err)
+		return
+	}
+
+	if err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
 		quit <- err
 		return
 	}
 
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		logger.Error("Unable to use fsnotify to watch for file changes, falling back to ticker")
-		newFileCheckTicker := time.NewTicker(newFileCheckInterval)
-		defer newFileCheckTicker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				logger.Info("Context cancelled, stopping processing")
-				return
-			case <-newFileCheckTicker.C:
-				logger.Info("Ticker ticked")
-				err = lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
-				if err != nil {
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("Context cancelled, stopping processing")
+			return
+		case event := <-watcher.Events:
+			if event.Has(fsnotify.Create) {
+				logger.Debug("Fsnotify sent event", slog.Any("event", event))
+				if err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
 					quit <- err
 					return
 				}
 			}
-		}
-	} else {
-		dir := path.Dir(logFilePattern)
-		if err = watcher.Add(dir); err != nil {
-			logger.Error("Error creating watch for directory", slog.Any("error", err), slog.String("directory", dir))
-		}
-		defer watcher.Close()
-
-		for {
-			select {
-			case <-ctx.Done():
-				logger.Info("Context cancelled, stopping processing")
-				return
-			case event := <-watcher.Events:
-				if event.Has(fsnotify.Create) {
-					logger.Debug("Fsnotify sent event", slog.Any("event", event))
-					err = lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers)
-					if err != nil {
-						quit <- err
-						return
-					}
-				}
-			case err = <-watcher.Errors:
-				logger.Error("Error watching files", slog.Any("error", err))
-				quit <- err
-				return
-			}
+		case err = <-watcher.Errors:
+			logger.Error("Error watching files", slog.Any("error", err))
+			quit <- err
+			return
 		}
 	}
 }
 
-func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]interface{}, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
+func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
 	logger.Info("Looking for files matching pattern", slog.String("pattern", logFilePattern))
 	matches, err := filepath.Glob(logFilePattern)
 	if err != nil {
@@ -97,7 +84,10 @@ func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- 
 	for _, match := range matches {
 		if _, ok := tailers[match]; !ok {
 			logger.Info("New file found, starting tail", slog.String("filepath", match))
-			t := NewTailer(match, logEntries, logLines, logger)
+			t, err := NewTailer(match, logEntries, logLines, logger)
+			if err != nil {
+				return err
+			}
 			tailers[match] = t
 			go t.Tail(ctx)
 		}
@@ -105,159 +95,79 @@ func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- 
 	return nil
 }
 
-func NewTailer(filePath string, logEntries chan<- map[string]interface{}, logLines chan<- string, internalLogger *slog.Logger) *Tailer {
+type tailLogger struct {
+	logger *slog.Logger
+}
+
+func (l *tailLogger) Printf(format string, v ...any) {
+	l.logger.Info(fmt.Sprintf(format, v...), slog.Any("component", "tailer-lib"))
+}
+
+func NewTailer(filePath string, logEntries chan<- map[string]any, logLines chan<- string, internalLogger *slog.Logger) (*Tailer, error) {
+	tailer, err := tail.TailFile(filePath, tail.Config{Follow: true, ReOpen: true, CompleteLines: true, Logger: &tailLogger{internalLogger}})
+	if err != nil {
+		internalLogger.Error("Unable to tail file", slog.String("filepath", filePath), slog.Any("error", err))
+		return nil, err
+	}
+
 	return &Tailer{
+		tailer,
 		filePath,
 		logEntries,
 		logLines,
 		internalLogger.With(slog.String("filename", path.Base(filePath))),
-	}
+	}, nil
 }
 
 func (t *Tailer) Tail(ctx context.Context) {
-	var err error
-	var logFile *os.File
 	for {
-		logFile, err = os.Open(t.filePath)
-		if err != nil {
-			t.internalLogger.Error("Unable to open file, retrying", slog.Any("error", err), slog.Any("retryInterval", retryInterval))
-			time.Sleep(retryInterval)
-			continue
-		}
-		break
-	}
-	defer logFile.Close()
-
-	// Seek to end of file if it exists (don't reprocess old logs on restart)
-	// Track file info for rotation detection
-	var lastFileInfo os.FileInfo
-	if info, err := logFile.Stat(); err == nil {
-		lastFileInfo = info
-		if info.Size() > 0 {
-			if pos, err := logFile.Seek(0, 2); err != nil {
-				t.internalLogger.Warn("Failed to seek to end of file", slog.Any("error", err))
-			} else {
-				t.internalLogger.Info("Skipping existing log content - only new logs will be processed", slog.Int64("file_size_bytes", info.Size()), slog.Int64("position", pos))
-			}
-		} else {
-			t.internalLogger.Info("Log file is empty - waiting for new log entries")
-		}
-	} else {
-		t.internalLogger.Warn("Failed to stat log file", slog.Any("error", err))
-	}
-
-	// Use bufio.Reader for line-by-line reading with better tail support
-	reader := bufio.NewReader(logFile)
-
-	// Log the initial file position
-	pos, _ := logFile.Seek(0, 1)
-	t.internalLogger.Info("Start tailing file", slog.Int64("position", pos))
-
-	// Ticker to check for log rotation every 5 seconds
-	rotationCheckTicker := time.NewTicker(5 * time.Second)
-	defer rotationCheckTicker.Stop()
-
-	entriesProcessed := 0
-
-	for {
-		// Check for context cancellation
 		select {
 		case <-ctx.Done():
-			t.internalLogger.Info("Context cancelled, stopping log processing")
+			t.internalLogger.Info("Context cancelled, stopping tailing")
+			t.tail.Cleanup()
 			return
-		default:
-		}
-
-		// Non-blocking rotation check
-		select {
-		case <-rotationCheckTicker.C:
-			if checkLogRotation(t.filePath, lastFileInfo) {
-				t.internalLogger.Info("Log rotation detected, reopening file...")
-				if err = logFile.Close(); err != nil {
-					t.internalLogger.Warn("Failed to close old log file", slog.Any("error", err))
-				}
-
-				// Reopen the file
-				newFile, err := os.Open(t.filePath)
-				if err != nil {
-					t.internalLogger.Warn("Failed to reopen log file after rotation", slog.Any("error", err), slog.Any("retryInterval", retryInterval))
-					time.Sleep(retryInterval)
-					continue
-				}
-
-				logFile = newFile
-				reader = bufio.NewReader(logFile)
-
-				// Update file info
-				if info, err := logFile.Stat(); err == nil {
-					lastFileInfo = info
-					t.internalLogger.Info("Successfully reopened log file", slog.Int64("new_file_size_bytes", info.Size()))
-				}
+		case tailEntry, ok := <-t.tail.Lines:
+			if !ok {
+				t.internalLogger.Info("Tail channel closed, stopping tailing", slog.Any("error", t.tail.Err()))
+				return
 			}
-		default:
-			// Don't block on rotation check
-		}
 
-		// Try to read the next line
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				// No more data available right now - wait and retry
-				time.Sleep(readInterval)
+			line := strings.TrimSpace(tailEntry.Text)
+
+			if line == "" {
+				continue // Skip empty lines
+			}
+
+			// Parse JSON log entry
+			var logEntry map[string]any
+			if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
+				truncatedLine := line
+				if len(truncatedLine) > truncatedLength {
+					truncatedLine = truncatedLine[:truncatedLength]
+				}
+				t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.String("truncated_line", truncatedLine))
 				continue
 			}
 
-			// Other error
-			t.internalLogger.Warn("Read error", slog.Any("error", err))
-			time.Sleep(readInterval)
-			continue
-		}
-
-		// Successfully read a line
-		line = strings.TrimSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\r") // Handle CRLF
-
-		if line == "" {
-			continue // Skip empty lines
-		}
-
-		// Parse JSON log entry
-		var logEntry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &logEntry); err != nil {
-			truncatedLine := line
-			if len(truncatedLine) > truncatedLength {
-				truncatedLine = truncatedLine[:truncatedLength]
-			}
-			t.internalLogger.Warn("Failed to parse JSON log line", slog.Any("error", err), slog.String("truncated_line", truncatedLine))
-			continue
-		}
-
-		entriesProcessed++
-		if entriesProcessed == 1 {
-			t.internalLogger.Debug("Successfully read first log entry!")
-		}
-		if entriesProcessed%100 == 0 {
-			t.internalLogger.Debug("Processing ...", slog.Int("entriesProcessed", entriesProcessed))
-		}
-
-		// Check for context cancellation between processing entries
-		select {
-		case <-ctx.Done():
-			t.internalLogger.Info("Context cancelled, stopping log processing")
-			return
-		default:
-		}
-
-		// Process the log entry
-		if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
+			// Check for context cancellation between processing entries
 			select {
-			case t.logEntries <- logEntry:
 			case <-ctx.Done():
+				t.internalLogger.Info("Context cancelled, stopping log processing")
+				return
+			default:
 			}
-		} else {
-			select {
-			case t.logLines <- line:
-			case <-ctx.Done():
+
+			// Process the log entry
+			if message, ok := logEntry["message"].(string); ok && strings.HasPrefix(message, "AUDIT:") {
+				select {
+				case t.logEntries <- logEntry:
+				case <-ctx.Done():
+				}
+			} else {
+				select {
+				case t.logLines <- line:
+				case <-ctx.Done():
+				}
 			}
 		}
 	}

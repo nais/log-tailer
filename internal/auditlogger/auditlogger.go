@@ -12,7 +12,7 @@ import (
 )
 
 type AuditLogger struct {
-	logEntries   <-chan map[string]interface{}
+	logEntries   <-chan map[string]any
 	quit         chan<- error
 	clusterName  string
 	projectID    string
@@ -20,7 +20,7 @@ type AuditLogger struct {
 	logger       *slog.Logger
 }
 
-func NewAuditLogger(logEntries <-chan map[string]interface{}, quit chan<- error, clusterName, projectID string, googleLoggingClient *logging.Client, logger *slog.Logger) *AuditLogger {
+func NewAuditLogger(logEntries <-chan map[string]any, quit chan<- error, clusterName, projectID string, googleLoggingClient *logging.Client, logger *slog.Logger) *AuditLogger {
 	return &AuditLogger{
 		logEntries,
 		quit,
@@ -48,7 +48,7 @@ func (a *AuditLogger) Log(ctx context.Context) {
 	}
 }
 
-func (a *AuditLogger) sendToGCP(logEntry map[string]interface{}) error {
+func (a *AuditLogger) sendToGCP(logEntry map[string]any) error {
 	entryJSON, err := json.Marshal(logEntry)
 	if err != nil {
 		return fmt.Errorf("failed to marshal log entry: %w", err)
@@ -76,8 +76,7 @@ func (a *AuditLogger) sendToGCP(logEntry map[string]interface{}) error {
 	if message, ok := logEntry["message"].(string); ok {
 		// Split by comma after "AUDIT: "
 		auditPrefix := "AUDIT: "
-		if strings.HasPrefix(message, auditPrefix) {
-			auditData := strings.TrimPrefix(message, auditPrefix)
+		if auditData, ok := strings.CutPrefix(message, auditPrefix); ok {
 			parts := strings.Split(auditData, ",")
 
 			// Extract audit type (SESSION, OBJECT, etc.) - index 0

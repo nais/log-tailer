@@ -1,0 +1,202 @@
+#!/bin/bash
+# [MISE] description="Run automated integration tests"
+# [MISE] depends=["build"]
+
+set -e
+
+TEMP_DIR=$(mktemp -d)
+echo "Using temp directory: $TEMP_DIR"
+
+NUM_FILES=3
+LOG_FILE_PREFIX="${TEMP_DIR}/test_postgres_"
+LOG_FILE_SUFFIX=".log"
+LOG_GLOB="${TEMP_DIR}/test_postgres_*.log"
+PROJECT_ID="test-project"
+
+LOG_FILES=()
+for i in $(seq 1 $NUM_FILES); do
+	LOG_FILES+=("${LOG_FILE_PREFIX}${i}${LOG_FILE_SUFFIX}")
+done
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+echo -e "${BLUE}=== Log Tailer Automated Test ===${NC}"
+echo ""
+
+for file in "${LOG_FILES[@]}"; do
+	touch "$file"
+done
+echo -e "${GREEN}Created test files: ${LOG_FILES[*]}${NC}"
+
+LOG_TAILER_OUT="${TEMP_DIR}/tailer_output.log"
+echo -e "${BLUE}Starting log-tailer in dry-run mode...${NC}"
+bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" --dry-run >"$LOG_TAILER_OUT" 2>&1 &
+TAILER_PID=$!
+
+SHOW_OUTPUT_ON_EXIT=false
+
+cleanup() {
+	kill "$TAILER_PID" 2>/dev/null || true
+
+	if [ "$SHOW_OUTPUT_ON_EXIT" = true ]; then
+		echo ""
+		echo -e "${BLUE}=== Log tailer output ===${NC}"
+		cat "$LOG_TAILER_OUT"
+	fi
+
+	rm -rf "$TEMP_DIR"
+}
+
+trap cleanup EXIT
+
+sleep 2
+
+if ! kill -0 $TAILER_PID 2>/dev/null; then
+	echo -e "${RED}ERROR: Log tailer failed to start!${NC}"
+	cat "$LOG_TAILER_OUT"
+	exit 1
+fi
+
+echo -e "${GREEN}Log tailer started (PID: $TAILER_PID)${NC}"
+echo ""
+
+add_log_entry() {
+	local file=$1
+	local user=$2
+	local dbname=$3
+	local message=$4
+	local backend_type=${5:-"client backend"}
+
+	echo "{\"timestamp\": \"2024-01-01T00:00:00Z\", \"user\": \"$user\", \"dbname\": \"$dbname\", \"message\": \"$message\", \"backend_type\": \"$backend_type\"}" >>"$file"
+}
+
+check_output_contains() {
+	local description=$1
+	local expected=$2
+	local timeout=${3:-5}
+
+	local end_time=$((SECONDS + timeout))
+	while [ "$SECONDS" -lt "$end_time" ]; do
+		if grep -qF "$expected" "$LOG_TAILER_OUT"; then
+			echo -e "${GREEN}✓ PASS:${NC} $description"
+			TESTS_PASSED=$((TESTS_PASSED + 1))
+			return 0
+		fi
+		sleep 0.5
+	done
+
+	echo -e "${RED}✗ FAIL:${NC} $description"
+	echo -e "${RED}  Expected to find: $expected${NC}"
+	TESTS_FAILED=$((TESTS_FAILED + 1))
+	return 1
+}
+
+echo -e "${BLUE}=== Running Tests ===${NC}"
+echo ""
+
+# Test 1: Regular log entry
+echo -e "${YELLOW}Test 1: Regular log entry${NC}"
+add_log_entry "${LOG_FILES[0]}" "testuser" "testdb" "Regular log message 1"
+check_output_contains "Regular log entry is captured" "Regular log message 1" || true
+
+# Test 2: AUDIT log entry
+echo -e "${YELLOW}Test 2: AUDIT log entry${NC}"
+add_log_entry "${LOG_FILES[1]}" "audituser" "auditdb" "AUDIT: SESSION,1,1,READ,SELECT,TABLE,public.users,SELECT * FROM users"
+check_output_contains "AUDIT log entry is captured" "AUDIT: SESSION,1,1,READ,SELECT,TABLE,public.users" || true
+
+# Test 3: Multiple entries across files
+echo -e "${YELLOW}Test 3: Multiple entries across files${NC}"
+add_log_entry "${LOG_FILES[0]}" "user1" "db1" "Multi-file test entry A"
+add_log_entry "${LOG_FILES[1]}" "user2" "db2" "Multi-file test entry B"
+add_log_entry "${LOG_FILES[2]}" "user3" "db3" "Multi-file test entry C"
+sleep 1
+check_output_contains "Entry A from file 1" "Multi-file test entry A" || true
+check_output_contains "Entry B from file 2" "Multi-file test entry B" || true
+check_output_contains "Entry C from file 3" "Multi-file test entry C" || true
+
+# Test 4: Special characters in message
+echo -e "${YELLOW}Test 4: Special characters in message${NC}"
+add_log_entry "${LOG_FILES[0]}" "testuser" "testdb" "Message with special chars: SELECT * FROM table WHERE id = 123"
+check_output_contains "Special characters handled" "SELECT * FROM table WHERE id = 123" || true
+
+# Test 5: Different backend types
+echo -e "${YELLOW}Test 5: Different backend types${NC}"
+add_log_entry "${LOG_FILES[1]}" "bguser" "bgdb" "Background worker message" "background worker"
+check_output_contains "Background worker log captured" "Background worker message" || true
+
+# Test 6: New file detection
+echo -e "${YELLOW}Test 6: New file detection${NC}"
+NEW_FILE="${TEMP_DIR}/test_postgres_new.log"
+touch "$NEW_FILE"
+sleep 2
+add_log_entry "$NEW_FILE" "newuser" "newdb" "Entry in dynamically added file"
+check_output_contains "New file detected and tailed" "Entry in dynamically added file" || true
+
+# Test 7: Rapid entries
+echo -e "${YELLOW}Test 7: Rapid consecutive entries${NC}"
+for i in {1..5}; do
+	add_log_entry "${LOG_FILES[$((i % NUM_FILES))]}" "rapiduser" "rapiddb" "Rapid entry number $i"
+done
+sleep 2
+check_output_contains "Rapid entry 1 captured" "Rapid entry number 1" || true
+check_output_contains "Rapid entry 5 captured" "Rapid entry number 5" || true
+
+# Test 8: File truncation
+echo -e "${YELLOW}Test 8: File truncation${NC}"
+TRUNCATE_FILE="${LOG_FILES[0]}"
+add_log_entry "$TRUNCATE_FILE" "truncuser" "truncdb" "Entry before truncation MARKER_BEFORE_TRUNCATE"
+sleep 1
+check_output_contains "Entry before truncation captured" "MARKER_BEFORE_TRUNCATE" || true
+: >"$TRUNCATE_FILE"
+sleep 1
+add_log_entry "$TRUNCATE_FILE" "truncuser" "truncdb" "Entry after truncation MARKER_AFTER_TRUNCATE"
+check_output_contains "Entry after truncation captured" "MARKER_AFTER_TRUNCATE" || true
+
+# Test 9: File deletion and re-creation (same name)
+echo -e "${YELLOW}Test 9: File deletion and re-creation (same name)${NC}"
+RECREATE_FILE="${LOG_FILES[1]}"
+add_log_entry "$RECREATE_FILE" "recreateuser" "recreatedb" "Entry before deletion MARKER_BEFORE_DELETE"
+sleep 1
+check_output_contains "Entry before deletion captured" "MARKER_BEFORE_DELETE" || true
+rm "$RECREATE_FILE"
+sleep 2
+touch "$RECREATE_FILE"
+sleep 2
+add_log_entry "$RECREATE_FILE" "recreateuser" "recreatedb" "Entry after re-creation MARKER_AFTER_RECREATE"
+check_output_contains "Entry after re-creation captured" "MARKER_AFTER_RECREATE" || true
+
+# Test 10: File deletion and creation (new name)
+echo -e "${YELLOW}Test 10: File deletion and creation (new name)${NC}"
+DELETE_FILE="${LOG_FILES[2]}"
+add_log_entry "$DELETE_FILE" "deleteuser" "deletedb" "Entry in file to be deleted MARKER_DELETED_FILE"
+sleep 1
+check_output_contains "Entry in deleted file captured" "MARKER_DELETED_FILE" || true
+rm "$DELETE_FILE"
+sleep 2
+REPLACEMENT_FILE="${TEMP_DIR}/test_postgres_replacement.log"
+touch "$REPLACEMENT_FILE"
+sleep 2
+add_log_entry "$REPLACEMENT_FILE" "newfileuser" "newfiledb" "Entry in replacement file MARKER_REPLACEMENT"
+check_output_contains "Entry in replacement file captured" "MARKER_REPLACEMENT" || true
+
+echo ""
+echo -e "${BLUE}=== Test Summary ===${NC}"
+echo -e "${GREEN}Passed: $TESTS_PASSED${NC}"
+echo -e "${RED}Failed: $TESTS_FAILED${NC}"
+echo ""
+
+if [ $TESTS_FAILED -gt 0 ]; then
+	SHOW_OUTPUT_ON_EXIT=true
+	echo -e "${RED}Some tests failed!${NC}"
+	exit 1
+else
+	echo -e "${GREEN}All tests passed!${NC}"
+	exit 0
+fi

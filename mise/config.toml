@@ -1,0 +1,33 @@
+[tools]
+go = "1.25.5"
+"go:honnef.co/go/tools/cmd/staticcheck" = "latest"
+"go:github.com/securego/gosec/v2/cmd/gosec" = "latest"
+"go:golang.org/x/vuln/cmd/govulncheck" = "latest"
+"go:mvdan.cc/gofumpt" = "latest"
+
+[settings]
+pin = true
+
+[tasks.lint]
+run = "staticcheck ./..."
+
+[tasks.format]
+run = "gofumpt -w ."
+
+[tasks.vulncheck]
+run = "govulncheck ./..."
+
+[tasks.security]
+run = "gosec ./..."
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.build]
+run = "go build -o bin/log-tailer ."
+
+[tasks.all]
+depends = ["test", "lint", "format", "vulncheck", "security"]
+
+[tasks.check]
+depends = ["test", "lint", "vulncheck", "security"]

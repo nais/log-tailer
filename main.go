@@ -27,8 +27,9 @@ const (
 
 func main() {
 	var projectID string
+	var dryRun bool
 
-	var rootCmd = &cobra.Command{
+	rootCmd := &cobra.Command{
 		Use:   "log-tailer <log-file-pattern>",
 		Short: "log-tailer tails JSON logs from Postgres, and ships audit-logs to a Google logging sink.",
 		Long: `Log-tailer tails JSON logs from Postgres and ships audit-logs to a Google 
@@ -41,10 +42,11 @@ Arguments:
 		`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			mainFunc(args[0], projectID)
+			mainFunc(args[0], projectID, dryRun)
 		},
 	}
 	rootCmd.Flags().StringVar(&projectID, "project-id", "", "GCP project ID (optional, for local testing)")
+	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Dry run mode: print audit logs to stdout instead of sending to GCP")
 
 	err := rootCmd.Execute()
 	if err != nil {
@@ -52,7 +54,7 @@ Arguments:
 	}
 }
 
-func mainFunc(logFilePath, projectID string) {
+func mainFunc(logFilePath, projectID string, dryRun bool) {
 	mainLogger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -97,7 +99,7 @@ func mainFunc(logFilePath, projectID string) {
 	mainLogger.Info("Sending audit logs to project")
 
 	quit := make(chan error)
-	logEntries := make(chan map[string]interface{}, auditLogEntryCapacity)
+	logEntries := make(chan map[string]any, auditLogEntryCapacity)
 	logLines := make(chan string, fileLogLinesCapacity)
 
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
@@ -105,29 +107,35 @@ func mainFunc(logFilePath, projectID string) {
 
 	go tailer.Watch(ctx, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
-	googleLoggingClientLogger := mainLogger.With(slog.String("component", "google-logging-client"))
-	client, err := logging.NewClient(ctx, teamProjectID, option.WithLogger(googleLoggingClientLogger))
-	if err != nil {
-		mainLogger.Error("Failed to create logging client", slog.Any("error", err))
-		os.Exit(4)
-	}
-	defer client.Close()
-
-	if !localMode {
-		err = client.Ping(ctx)
+	if dryRun {
+		mainLogger.Info("Running in dry-run mode, audit logs will be printed to stdout")
+		dryRunLogger := auditlogger.NewDryRunAuditLogger(logEntries, quit, mainLogger)
+		go dryRunLogger.Log(ctx)
+	} else {
+		googleLoggingClientLogger := mainLogger.With(slog.String("component", "google-logging-client"))
+		client, err := logging.NewClient(ctx, teamProjectID, option.WithLogger(googleLoggingClientLogger))
 		if err != nil {
-			mainLogger.Error("Failed to ping google logging service", slog.Any("error", err))
-			os.Exit(5)
+			mainLogger.Error("Failed to create logging client", slog.Any("error", err))
+			os.Exit(4)
 		}
-	}
+		defer client.Close()
 
-	auditLogger := auditlogger.NewAuditLogger(logEntries, quit, clusterName, teamProjectID, client, mainLogger)
-	go auditLogger.Log(ctx)
+		if !localMode {
+			err = client.Ping(ctx)
+			if err != nil {
+				mainLogger.Error("Failed to ping google logging service", slog.Any("error", err))
+				os.Exit(5)
+			}
+		}
+
+		auditLogger := auditlogger.NewAuditLogger(logEntries, quit, clusterName, teamProjectID, client, mainLogger)
+		go auditLogger.Log(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
-	case err = <-quit:
-		mainLogger.Error("Error during processing of logs", slog.Any("error", err))
+	case quitErr := <-quit:
+		mainLogger.Error("Error during processing of logs", slog.Any("error", quitErr))
 		os.Exit(100)
 	}
 }

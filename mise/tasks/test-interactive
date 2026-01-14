@@ -1,14 +1,18 @@
 #!/bin/bash
-# Interactive test script to verify log-tailer functionality
-# This script allows you to manually add log entries and see if they're picked up
+# [MISE] description="Run interactive test script"
+# [MISE] depends=["build"]
 
 set -e
 
+# Create temp directory for test files
+TEMP_DIR=$(mktemp -d)
+echo "Using temp directory: $TEMP_DIR"
+
 # Number of log files to use for round robin
 NUM_FILES=3
-LOG_FILE_PREFIX="/tmp/test_postgres_interactive_"
+LOG_FILE_PREFIX="${TEMP_DIR}/test_postgres_interactive_"
 LOG_FILE_SUFFIX=".log"
-LOG_GLOB="/tmp/test_postgres_interactive_*.log"
+LOG_GLOB="${TEMP_DIR}/test_postgres_interactive_*.log"
 PROJECT_ID="test-project"
 
 # Build array of log files
@@ -22,7 +26,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${BLUE}=== Log Tailer Interactive Test (Round Robin, $NUM_FILES files) ===${NC}"
 echo ""
@@ -33,39 +37,29 @@ for file in "${LOG_FILES[@]}"; do
         echo -e "${YELLOW}Removing existing test file $file...${NC}"
         rm "$file"
     fi
-    # Create an empty log file
     touch "$file"
 done
 echo -e "${GREEN}Created empty test files: ${LOG_FILES[*]}${NC}"
 echo ""
 
-# Build the log-tailer if not already built
-if [ ! -f "bin/log-tailer" ]; then
-    echo -e "${YELLOW}Building log-tailer...${NC}"
-    mise run build
-    echo -e "${GREEN}Build complete${NC}"
-    echo ""
-fi
-
 # Start the log tailer in the background with the glob pattern
-LOG_TAILER_OUT="/tmp/tailer_output.log"
+LOG_TAILER_OUT="${TEMP_DIR}/tailer_output.log"
 echo -e "${BLUE}Starting log-tailer in background (glob: $LOG_GLOB)...${NC}"
-bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" > "$LOG_TAILER_OUT" 2>&1 &
+bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" --dry-run > "$LOG_TAILER_OUT" 2>&1 &
 TAILER_PID=$!
 
 # Function to cleanup on exit
 cleanup() {
     echo ""
     echo -e "${YELLOW}Cleaning up...${NC}"
-    kill $TAILER_PID 2>/dev/null || true
+    kill "$TAILER_PID" 2>/dev/null || true
     echo -e "${GREEN}Log tailer stopped (PID: $TAILER_PID)${NC}"
     echo ""
     echo -e "${BLUE}Log tailer output:${NC}"
     cat "$LOG_TAILER_OUT"
     echo ""
-    for file in "${LOG_FILES[@]}"; do
-        rm -f "$file"
-    done
+    rm -rf "$TEMP_DIR"
+    echo -e "${GREEN}Removed temp directory: $TEMP_DIR${NC}"
 }
 
 trap cleanup EXIT
@@ -74,7 +68,7 @@ trap cleanup EXIT
 sleep 2
 
 # Check if tailer is still running
-if ! kill -0 $TAILER_PID 2>/dev/null; then
+if ! kill -0 "$TAILER_PID" 2>/dev/null; then
     echo -e "${RED}ERROR: Log tailer failed to start!${NC}"
     cat "$LOG_TAILER_OUT"
     exit 1
@@ -93,7 +87,8 @@ add_log_entry() {
     local entry_type=$2
     local file_index=$(( (entry_num - 1) % NUM_FILES ))
     local target_file="${LOG_FILES[$file_index]}"
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     if [ "$entry_type" = "audit" ]; then
         local message="AUDIT: SESSION,$entry_num,1,READ,SELECT,TABLE,public.users,SELECT * FROM users WHERE id = $entry_num"
@@ -106,7 +101,8 @@ add_log_entry() {
     fi
 
     # Show current file size
-    local size=$(wc -c < "$target_file" | tr -d ' ')
+    local size
+    size=$(wc -c < "$target_file" | tr -d ' ')
     echo -e "${BLUE}File size for $target_file: $size bytes${NC}"
 }
 
@@ -197,4 +193,3 @@ while true; do
             ;;
     esac
 done
-
