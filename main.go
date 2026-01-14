@@ -102,7 +102,7 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 	logEntries := make(chan map[string]any, auditLogEntryCapacity)
 	logLines := make(chan string, fileLogLinesCapacity)
 
-	fileLogger := filelogger.NewFileLogger(logLines, mainLogger)
+	fileLogger := filelogger.NewFileLogger(logLines, mainLogger, dryRun)
 	go fileLogger.Log(ctx)
 
 	go tailer.Watch(ctx, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
