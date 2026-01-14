@@ -22,7 +22,7 @@ A Go application that tails PostgreSQL JSON logs and routes audit logs to GCP Cl
 ### In Kubernetes (Production)
 
 ```bash
-log-tailer -log-file <path-to-log-file>
+log-tailer <log-file-pattern>
 ```
 
 The application will automatically fetch the GCP project ID from the parent namespace annotation.
@@ -30,26 +30,40 @@ The application will automatically fetch the GCP project ID from the parent name
 ### Local Testing
 
 ```bash
-log-tailer -log-file <path-to-log-file> -project-id <gcp-project-id>
+log-tailer <log-file-pattern> --project-id <gcp-project-id>
 ```
 
-When `-project-id` is provided, the application runs in local mode and skips Kubernetes API calls.
+When `--project-id` is provided, the application runs in local mode and skips Kubernetes API calls.
+
+### Dry Run Mode
+
+```bash
+log-tailer <log-file-pattern> --project-id <gcp-project-id> --dry-run
+```
+
+In dry-run mode, audit logs are printed to stdout with `[DRY-RUN AUDIT]` prefix instead of being sent to GCP. Regular logs are prefixed with `[DRY-RUN STDOUT]`. This is useful for testing without GCP credentials.
 
 ### Flags
 
-- `-log-file`: Path to the log file to tail (required)
-- `-project-id`: GCP project ID (optional, for local testing; if not set, will be fetched from parent namespace)
+- `<log-file-pattern>`: Glob pattern for log files to tail (required, e.g., `/var/log/postgresql*.log`)
+- `--project-id`: GCP project ID (optional, for local testing; if not set, will be fetched from parent namespace)
+- `--dry-run`: Print audit logs to stdout instead of sending to GCP
 
 ### Examples
 
 **Kubernetes mode:**
 ```bash
-log-tailer -log-file /home/postgres/pgdata/pgroot/pg_log/postgresql.json
+log-tailer "/home/postgres/pgdata/pgroot/pg_log/postgresql*.json"
 ```
 
 **Local mode:**
 ```bash
-log-tailer -log-file /var/log/postgresql.json -project-id my-gcp-project
+log-tailer "/var/log/postgresql*.json" --project-id my-gcp-project
+```
+
+**Dry run mode:**
+```bash
+log-tailer "/var/log/postgresql*.json" --project-id my-gcp-project --dry-run
 ```
 
 ## How It Works
@@ -193,19 +207,35 @@ docker run --rm \
 
 ## Testing
 
-### Interactive Test Script
+### Integration Tests
 
-Use the interactive test script to manually verify the log-tailer works correctly:
+Run the automated integration tests:
 
 ```bash
-./interactive_test.sh
+mise run test-integration
 ```
 
-**What it does:**
-- Creates a clean test log file
-- Starts the log-tailer in the background
-- Provides an interactive menu to add log entries in real-time
-- Shows tailer output to verify logs are being processed
+For verbose output showing each test:
+
+```bash
+mise run test-integration -- --verbose
+```
+
+The integration tests verify:
+- Regular and AUDIT log entry capture
+- Multiple files with glob patterns
+- New file detection
+- File truncation handling
+- File deletion and re-creation
+- Rapid consecutive entries
+
+### Interactive Test
+
+Use the interactive test for manual verification:
+
+```bash
+mise run test-interactive
+```
 
 **Commands:**
 - `1` - Add a regular log entry
@@ -213,26 +243,28 @@ Use the interactive test script to manually verify the log-tailer works correctl
 - `3` - Add 5 regular entries quickly
 - `4` - Add 5 AUDIT entries quickly
 - `5` - Show tailer output (last 30 lines)
-- `6` - Show test file size and line count
+- `6` - Show test file sizes
+- `7` - Add a new log file
 - `q` - Quit and cleanup
 
-**Expected behavior:**
-- Regular logs appear in stdout as JSON
-- AUDIT logs are sent to GCP Cloud Logging (permission errors are normal in local testing without proper credentials)
-- The tailer automatically skips existing content and only processes newly added entries
+### Unit Tests
 
-This is useful for:
-- Verifying the tailer correctly detects and reads new log entries
-- Testing the AUDIT log detection and routing logic
-- Debugging tailing behavior with realistic log data
+```bash
+mise run test
+```
 
 ## Development
 
-Uses [mise](https://mise.jdx.dev/) for tooling:
+Uses [mise](https://mise.jdx.dev/) for tooling. Configuration is in `mise/config.toml`.
 
 ```bash
-mise install      # Install dependencies
-mise build        # Build the application
-mise test         # Run tests
-mise check        # Run all checks (vet, staticcheck, gosec, gofumpt, vulncheck)
+mise install           # Install dependencies
+mise run build         # Build the application
+mise run test          # Run unit tests
+mise run test-integration  # Run integration tests
+mise run test-interactive  # Run interactive test
+mise run lint          # Run staticcheck
+mise run format        # Format code with gofumpt
+mise run check         # Run all checks (test, lint, vulncheck, security)
+mise run all           # Run all checks plus format
 ```

@@ -43,7 +43,7 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 
 if [ "$VERBOSE" = true ]; then
-	echo -e "${BLUE}=== Log Tailer Automated Test ===${NC}"
+	echo -e "${BLUE}🧪 Log Tailer Integration Tests${NC}"
 	echo ""
 fi
 
@@ -51,12 +51,12 @@ for file in "${LOG_FILES[@]}"; do
 	touch "$file"
 done
 if [ "$VERBOSE" = true ]; then
-	echo -e "${GREEN}Created test files: ${LOG_FILES[*]}${NC}"
+	echo -e "${GREEN}📁 Created test files: ${LOG_FILES[*]}${NC}"
 fi
 
 LOG_TAILER_OUT="${TEMP_DIR}/tailer_output.log"
 if [ "$VERBOSE" = true ]; then
-	echo -e "${BLUE}Starting log-tailer in dry-run mode...${NC}"
+	echo -e "${BLUE}🚀 Starting log-tailer in dry-run mode...${NC}"
 fi
 bin/log-tailer "$LOG_GLOB" --project-id="$PROJECT_ID" --dry-run >"$LOG_TAILER_OUT" 2>&1 &
 TAILER_PID=$!
@@ -122,34 +122,34 @@ check_output_contains() {
 	local end_time=$((SECONDS + timeout))
 	while [ "$SECONDS" -lt "$end_time" ]; do
 		if grep -qF "$expected" "$LOG_TAILER_OUT"; then
-			log_verbose "${GREEN}✓ PASS:${NC} $description"
+			log_verbose "${GREEN}✅ PASS:${NC} $description"
 			TESTS_PASSED=$((TESTS_PASSED + 1))
 			return 0
 		fi
 		sleep 0.1
 	done
 
-	echo -e "${RED}✗ FAIL:${NC} $description"
-	echo -e "${RED}  Expected to find: $expected${NC}"
+	echo -e "${RED}❌ FAIL:${NC} $description"
+	echo -e "${RED}   Expected to find: $expected${NC}"
 	TESTS_FAILED=$((TESTS_FAILED + 1))
 	return 1
 }
 
-log_verbose "${BLUE}=== Running Tests ===${NC}"
+log_verbose "${BLUE}🔬 Running Tests${NC}"
 log_verbose ""
 
 # Test 1: Regular log entry
-log_verbose "${YELLOW}Test 1: Regular log entry${NC}"
+log_verbose "${YELLOW}📝 Test 1: Regular log entry${NC}"
 add_log_entry "${LOG_FILES[0]}" "testuser" "testdb" "Regular log message 1"
 check_output_contains "Regular log entry is captured" "Regular log message 1" || true
 
 # Test 2: AUDIT log entry
-log_verbose "${YELLOW}Test 2: AUDIT log entry${NC}"
+log_verbose "${YELLOW}🔒 Test 2: AUDIT log entry${NC}"
 add_log_entry "${LOG_FILES[1]}" "audituser" "auditdb" "AUDIT: SESSION,1,1,READ,SELECT,TABLE,public.users,SELECT * FROM users"
 check_output_contains "AUDIT log entry is captured" "AUDIT: SESSION,1,1,READ,SELECT,TABLE,public.users" || true
 
 # Test 3: Multiple entries across files
-log_verbose "${YELLOW}Test 3: Multiple entries across files${NC}"
+log_verbose "${YELLOW}📚 Test 3: Multiple entries across files${NC}"
 add_log_entry "${LOG_FILES[0]}" "user1" "db1" "Multi-file test entry A"
 add_log_entry "${LOG_FILES[1]}" "user2" "db2" "Multi-file test entry B"
 add_log_entry "${LOG_FILES[2]}" "user3" "db3" "Multi-file test entry C"
@@ -158,24 +158,24 @@ check_output_contains "Entry B from file 2" "Multi-file test entry B" || true
 check_output_contains "Entry C from file 3" "Multi-file test entry C" || true
 
 # Test 4: Special characters in message
-log_verbose "${YELLOW}Test 4: Special characters in message${NC}"
+log_verbose "${YELLOW}🔤 Test 4: Special characters in message${NC}"
 add_log_entry "${LOG_FILES[0]}" "testuser" "testdb" "Message with special chars: SELECT * FROM table WHERE id = 123"
 check_output_contains "Special characters handled" "SELECT * FROM table WHERE id = 123" || true
 
 # Test 5: Different backend types
-log_verbose "${YELLOW}Test 5: Different backend types${NC}"
+log_verbose "${YELLOW}⚙️ Test 5: Different backend types${NC}"
 add_log_entry "${LOG_FILES[1]}" "bguser" "bgdb" "Background worker message" "background worker"
 check_output_contains "Background worker log captured" "Background worker message" || true
 
 # Test 6: New file detection
-log_verbose "${YELLOW}Test 6: New file detection${NC}"
+log_verbose "${YELLOW}🆕 Test 6: New file detection${NC}"
 NEW_FILE="${TEMP_DIR}/test_postgres_new.log"
 touch "$NEW_FILE"
 add_log_entry "$NEW_FILE" "newuser" "newdb" "Entry in dynamically added file"
 check_output_contains "New file detected and tailed" "Entry in dynamically added file" || true
 
 # Test 7: Rapid entries
-log_verbose "${YELLOW}Test 7: Rapid consecutive entries${NC}"
+log_verbose "${YELLOW}⚡ Test 7: Rapid consecutive entries${NC}"
 for i in {1..5}; do
 	add_log_entry "${LOG_FILES[$((i % NUM_FILES))]}" "rapiduser" "rapiddb" "Rapid entry number $i"
 done
@@ -183,7 +183,7 @@ check_output_contains "Rapid entry 1 captured" "Rapid entry number 1" || true
 check_output_contains "Rapid entry 5 captured" "Rapid entry number 5" || true
 
 # Test 8: File truncation
-log_verbose "${YELLOW}Test 8: File truncation${NC}"
+log_verbose "${YELLOW}✂️ Test 8: File truncation${NC}"
 TRUNCATE_FILE="${TEMP_DIR}/test_postgres_truncate.log"
 touch "$TRUNCATE_FILE"
 sleep 1
@@ -194,7 +194,7 @@ add_log_entry "$TRUNCATE_FILE" "truncuser" "truncdb" "Entry after truncation MAR
 check_output_contains "Entry after truncation captured" "MARKER_AFTER_TRUNCATE" || true
 
 # Test 9: File deletion and re-creation (same name)
-log_verbose "${YELLOW}Test 9: File deletion and re-creation (same name)${NC}"
+log_verbose "${YELLOW}🔄 Test 9: File deletion and re-creation (same name)${NC}"
 RECREATE_FILE="${TEMP_DIR}/test_postgres_recreate.log"
 touch "$RECREATE_FILE"
 sleep 1
@@ -206,7 +206,7 @@ add_log_entry "$RECREATE_FILE" "recreateuser" "recreatedb" "Entry after re-creat
 check_output_contains "Entry after re-creation captured" "MARKER_AFTER_RECREATE" || true
 
 # Test 10: File deletion and creation (new name)
-log_verbose "${YELLOW}Test 10: File deletion and creation (new name)${NC}"
+log_verbose "${YELLOW}🗑️ Test 10: File deletion and creation (new name)${NC}"
 DELETE_FILE="${TEMP_DIR}/test_postgres_delete.log"
 touch "$DELETE_FILE"
 sleep 1
@@ -219,13 +219,13 @@ add_log_entry "$REPLACEMENT_FILE" "newfileuser" "newfiledb" "Entry in replacemen
 check_output_contains "Entry in replacement file captured" "MARKER_REPLACEMENT" || true
 
 log_verbose ""
-log_verbose "${BLUE}=== Test Summary ===${NC}"
-log_verbose "${GREEN}Passed: $TESTS_PASSED${NC}"
-log_verbose "${RED}Failed: $TESTS_FAILED${NC}"
+log_verbose "${BLUE}📊 Test Summary${NC}"
+log_verbose "${GREEN}   Passed: $TESTS_PASSED${NC}"
+log_verbose "${RED}   Failed: $TESTS_FAILED${NC}"
 log_verbose ""
 
 if [ "$VERBOSE" = true ]; then
-	log_verbose "${BLUE}=== Log File Contents ===${NC}"
+	log_verbose "${BLUE}📄 Log File Contents${NC}"
 	for file in "${LOG_FILES[@]}" "$NEW_FILE" "$TRUNCATE_FILE" "$RECREATE_FILE" "$REPLACEMENT_FILE"; do
 		if [ -f "$file" ]; then
 			log_verbose "${YELLOW}$file:${NC}"
@@ -237,9 +237,9 @@ fi
 
 if [ $TESTS_FAILED -gt 0 ]; then
 	SHOW_OUTPUT_ON_EXIT=true
-	echo -e "${RED}Some tests failed!${NC}"
+	echo -e "${RED}❌ Some tests failed!${NC}"
 	exit 1
 else
-	echo -e "${GREEN}All tests passed!${NC}"
+	echo -e "${GREEN}✅ All tests passed!${NC}"
 	exit 0
 fi
