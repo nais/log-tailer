@@ -24,6 +24,8 @@ run = "gosec -quiet ./..."
 run = "go test ./..."
 
 [tasks.build]
+sources = ["./**/*.go"]
+outputs = ["bin/log-tailer"]
 run = "go build -o bin/log-tailer ."
 
 [tasks.all]
