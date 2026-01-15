@@ -8,17 +8,13 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/SEKOIA-IO/tail"
 	"github.com/fsnotify/fsnotify"
 )
 
 const (
-	retryInterval        = 5 * time.Second
-	readInterval         = 100 * time.Millisecond
-	truncatedLength      = 200
-	newFileCheckInterval = 1 * time.Minute
+	truncatedLength = 200
 )
 
 // Tailer tails a single log file and sends parsed log entries to channels
