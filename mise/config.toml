@@ -28,8 +28,9 @@ sources = ["./**/*.go"]
 outputs = ["bin/log-tailer"]
 run = "go build -o bin/log-tailer ."
 
-[tasks.all]
-depends = ["test", "lint", "format", "vulncheck", "security"]
-
 [tasks.check]
 depends = ["test", "lint", "vulncheck", "security", "test-integration"]
+
+[tasks.all]
+depends = ["build", "check"]
+

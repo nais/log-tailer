@@ -21,13 +21,14 @@ const (
 type Tailer struct {
 	tail *tail.Tail
 
-	filePath       string
-	logEntries     chan<- map[string]any
-	logLines       chan<- string
-	internalLogger *slog.Logger
+	auditSplitEnabled bool
+	filePath          string
+	logEntries        chan<- map[string]any
+	logLines          chan<- string
+	internalLogger    *slog.Logger
 }
 
-func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, quit chan<- error, logger *slog.Logger) {
+func Watch(ctx context.Context, auditSplitEnabled bool, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, quit chan<- error, logger *slog.Logger) {
 	tailers := make(map[string]*Tailer)
 
 	watcher, err := fsnotify.NewWatcher()
@@ -43,7 +44,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 		return
 	}
 
-	if err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
+	if err := lookForFiles(ctx, auditSplitEnabled, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
 		quit <- err
 		return
 	}
@@ -56,7 +57,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 		case event := <-watcher.Events:
 			if event.Has(fsnotify.Create) {
 				logger.Debug("Fsnotify sent event", slog.Any("event", event))
-				if err := lookForFiles(ctx, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
+				if err := lookForFiles(ctx, auditSplitEnabled, logFilePattern, logEntries, logLines, logger, tailers); err != nil {
 					quit <- err
 					return
 				}
@@ -69,7 +70,7 @@ func Watch(ctx context.Context, logFilePattern string, logEntries chan<- map[str
 	}
 }
 
-func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
+func lookForFiles(ctx context.Context, auditSplitEnabled bool, logFilePattern string, logEntries chan<- map[string]any, logLines chan<- string, logger *slog.Logger, tailers map[string]*Tailer) error {
 	logger.Info("Looking for files matching pattern", slog.String("pattern", logFilePattern))
 	matches, err := filepath.Glob(logFilePattern)
 	if err != nil {
@@ -79,7 +80,7 @@ func lookForFiles(ctx context.Context, logFilePattern string, logEntries chan<- 
 	for _, match := range matches {
 		if _, ok := tailers[match]; !ok {
 			logger.Info("New file found, starting tail", slog.String("filepath", match))
-			t, err := NewTailer(match, logEntries, logLines, logger)
+			t, err := NewTailer(match, auditSplitEnabled, logEntries, logLines, logger)
 			if err != nil {
 				return err
 			}
@@ -98,7 +99,7 @@ func (l *tailLogger) Printf(format string, v ...any) {
 	l.logger.Info(fmt.Sprintf(format, v...), slog.Any("component", "tailer-lib"))
 }
 
-func NewTailer(filePath string, logEntries chan<- map[string]any, logLines chan<- string, internalLogger *slog.Logger) (*Tailer, error) {
+func NewTailer(filePath string, auditSplitEnabled bool, logEntries chan<- map[string]any, logLines chan<- string, internalLogger *slog.Logger) (*Tailer, error) {
 	tailer, err := tail.TailFile(filePath, tail.Config{Follow: true, ReOpen: true, CompleteLines: true, Logger: &tailLogger{internalLogger}})
 	if err != nil {
 		internalLogger.Error("Unable to tail file", slog.String("filepath", filePath), slog.Any("error", err))
@@ -107,6 +108,7 @@ func NewTailer(filePath string, logEntries chan<- map[string]any, logLines chan<
 
 	return &Tailer{
 		tailer,
+		auditSplitEnabled,
 		filePath,
 		logEntries,
 		logLines,
@@ -131,6 +133,14 @@ func (t *Tailer) Tail(ctx context.Context) {
 
 			if line == "" {
 				continue // Skip empty lines
+			}
+
+			if !t.auditSplitEnabled {
+				select {
+				case t.logLines <- line:
+				case <-ctx.Done():
+				}
+				continue
 			}
 
 			// Parse JSON log entry

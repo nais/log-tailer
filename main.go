@@ -62,17 +62,15 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 
 	go handleShutdown(cancel, mainLogger)
 
-	var namespace string
-	var clusterName string
 	var teamProjectID string
+	namespace := "local"
+	clusterName := "local-cluster"
 
 	// If project-id is provided, use it for local testing
 	if projectID != "" {
 		teamProjectID = projectID
-		namespace = "local"
-		clusterName = "local-cluster"
 		mainLogger.Info("Running in testing mode", slog.String("projectID", teamProjectID))
-	} else {
+	} else if !dryRun {
 		// Only create K8s client when running in cluster
 		k8sClient, err := getK8sClient()
 		if err != nil {
@@ -94,7 +92,7 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 	}
 
 	mainLogger = mainLogger.With(slog.String("projectID", teamProjectID), slog.String("namespace", namespace), slog.String("clusterName", clusterName))
-	mainLogger.Info("Sending audit logs to project")
+	mainLogger.Info("Starting to collect logs")
 
 	quit := make(chan error)
 	logEntries := make(chan map[string]any, auditLogEntryCapacity)
@@ -103,7 +101,7 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger, dryRun)
 	go fileLogger.Log(ctx)
 
-	go tailer.Watch(ctx, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
+	go tailer.Watch(ctx, teamProjectID != "", logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
 	if dryRun {
 		mainLogger.Info("Running in dry-run mode, audit logs will be printed to stdout")
@@ -173,6 +171,12 @@ func getProjectIDFromNamespace(client *kubernetes.Clientset, namespace string) (
 	ns, err := client.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to get namespace %s: %w", namespace, err)
+	}
+
+	_, ok := ns.Labels["team"]
+	if !ok {
+		// Not a team namespace, no audit logging available
+		return "", nil
 	}
 
 	projectID, ok := ns.Labels["google-cloud-project"]
