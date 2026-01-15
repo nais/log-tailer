@@ -101,13 +101,14 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 	fileLogger := filelogger.NewFileLogger(logLines, mainLogger, dryRun)
 	go fileLogger.Log(ctx)
 
-	go tailer.Watch(ctx, teamProjectID != "", logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
+	auditSplitEnabled := teamProjectID != ""
+	go tailer.Watch(ctx, auditSplitEnabled, logFilePath, logEntries, logLines, quit, mainLogger.With(slog.String("component", "tailer")))
 
 	if dryRun {
 		mainLogger.Info("Running in dry-run mode, audit logs will be printed to stdout")
 		dryRunLogger := auditlogger.NewDryRunAuditLogger(logEntries, quit, mainLogger)
 		go dryRunLogger.Log(ctx)
-	} else {
+	} else if auditSplitEnabled {
 		googleLoggingClientLogger := mainLogger.With(slog.String("component", "google-logging-client"))
 		client, err := logging.NewClient(ctx, teamProjectID, option.WithLogger(googleLoggingClientLogger))
 		if err != nil {
