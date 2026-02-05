@@ -1,5 +1,9 @@
 [tools]
-go = "1.25.5"
+go = """
+{%- set command = 'grep "^go [0-9]*\\.[0-9]*" ' ~ config_root ~ "/go.mod | awk '{print $2}'" -%}
+
+{{- exec(cache_key="go", command=command) -}}
+"""
 "go:honnef.co/go/tools/cmd/staticcheck" = "latest"
 "go:github.com/securego/gosec/v2/cmd/gosec" = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
