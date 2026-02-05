@@ -84,10 +84,14 @@ func mainFunc(logFilePath, projectID string, dryRun bool) {
 			os.Exit(2)
 		}
 
-		teamProjectID, err = getProjectIDFromNamespace(k8sClient, namespace)
-		if err != nil {
-			mainLogger.Error("Failed to get project ID", slog.Any("error", err))
-			os.Exit(2)
+		if namespace == "pg-nais-verification" {
+			mainLogger.Warn("Audit logging disabled in pg-nais-verification namespace")
+		} else {
+			teamProjectID, err = getProjectIDFromNamespace(k8sClient, namespace)
+			if err != nil {
+				mainLogger.Error("Failed to get project ID", slog.Any("error", err))
+				os.Exit(2)
+			}
 		}
 	}
 
