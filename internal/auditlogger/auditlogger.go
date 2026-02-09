@@ -2,7 +2,6 @@ package auditlogger
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -49,11 +48,6 @@ func (a *AuditLogger) Log(ctx context.Context) {
 }
 
 func (a *AuditLogger) sendToGCP(logEntry map[string]any) error {
-	entryJSON, err := json.Marshal(logEntry)
-	if err != nil {
-		return fmt.Errorf("failed to marshal log entry: %w", err)
-	}
-
 	// Extract additional fields for labels
 	labels := make(map[string]string)
 
@@ -113,7 +107,7 @@ func (a *AuditLogger) sendToGCP(logEntry map[string]any) error {
 	}
 
 	entry := logging.Entry{
-		Payload:  string(entryJSON),
+		Payload:  logEntry,
 		Severity: logging.Info,
 		Labels:   labels,
 		Resource: resource,
@@ -122,7 +116,7 @@ func (a *AuditLogger) sendToGCP(logEntry map[string]any) error {
 	a.googleLogger.Log(entry)
 
 	// Flush after every entry, to ensure it is sent right away to avoid losing entries in the event of crash or unexpected exit
-	if err = a.googleLogger.Flush(); err != nil {
+	if err := a.googleLogger.Flush(); err != nil {
 		return fmt.Errorf("failed to flush logger: %w", err)
 	}
 
