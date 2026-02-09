@@ -4,25 +4,18 @@ go = """
 
 {{- exec(cache_key="go", command=command) -}}
 """
-"go:honnef.co/go/tools/cmd/staticcheck" = "latest"
-"go:github.com/securego/gosec/v2/cmd/gosec" = "latest"
-"go:golang.org/x/vuln/cmd/govulncheck" = "latest"
-"go:mvdan.cc/gofumpt" = "latest"
-
-[settings]
-pin = true
 
 [tasks.lint]
-run = "staticcheck ./..."
+run = "go tool staticcheck ./..."
 
 [tasks.format]
-run = "gofumpt -w ."
+run = "go tool gofumpt -w ."
 
 [tasks.vulncheck]
-run = "govulncheck ./..."
+run = "go tool govulncheck ./..."
 
 [tasks.security]
-run = "gosec -quiet ./..."
+run = "go tool gosec -quiet ./..."
 
 [tasks.test]
 run = "go test ./..."
